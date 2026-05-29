@@ -1,6 +1,7 @@
 # Barcode_Merger
 
 半夜闲来无事写的小工具
+
 Barcode_Merger 是一个用于 TEMU 条码 PDF 合成的桌面工具，使用 Python 编写，界面基于 Tkinter，PDF 处理依赖 PyMuPDF。
 
 ## 下载使用
