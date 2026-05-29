@@ -65,6 +65,8 @@ run_app.bat
 python barcode_merger_gui.py
 ```
 
+方式三：从 Release 下载打包好的程序启动。
+
 ## 打包 exe
 
 进入 `barcode_merger_exe` 目录后运行：
