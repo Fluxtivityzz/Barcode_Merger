@@ -160,6 +160,7 @@ class BarcodeMergerApp:
         self.preview_after_id = None
         self.valid_barcode_indices = []
         self.settings_save_after_id = None
+        self.is_closing = False
 
         self.base_pdf_var = tk.StringVar()
         self.barcode_pdf_var = tk.StringVar()
@@ -295,6 +296,8 @@ class BarcodeMergerApp:
         )
 
     def on_close(self) -> None:
+        self.is_closing = True
+
         # 停止合并线程
         if self.merge_thread and self.merge_thread.is_running():
             self.merge_thread.stop()
@@ -1009,6 +1012,7 @@ class BarcodeMergerApp:
         if not base_pdf or not barcode_pdf:
             return
 
+        temp = None
         try:
             params = self.get_params()
 
@@ -1089,11 +1093,15 @@ class BarcodeMergerApp:
                 f"left {target_rect.x0:.2f}, top {target_rect.y0:.2f}, right {target_rect.x1:.2f}, bottom {target_rect.y1:.2f}"
             )
 
-            temp.close()
-
         except Exception as exc:
             self.draw_preview_placeholder(str(exc))
             self.log(f"Preview failed: {exc}")
+        finally:
+            if temp:
+                try:
+                    temp.close()
+                except Exception:
+                    pass
 
     def merge_pdf(self) -> None:
         # 检查是否已有合并任务运行
@@ -1148,12 +1156,19 @@ class BarcodeMergerApp:
 
     def _on_merge_progress(self, current: int, total: int, message: str) -> None:
         """合并进度回调"""
-        self.root.after(0, lambda: self.log(message))
+        if self.is_closing:
+            return
+        try:
+            self.root.after(0, lambda: self.log(message))
+        except tk.TclError:
+            pass
 
     def _on_merge_complete(self, result: Dict[str, Any]) -> None:
         """合并完成回调"""
 
         def on_complete_ui():
+            if self.is_closing:
+                return
             self.log("=" * 60)
             self.log("Merge completed successfully")
             self.log("=" * 60)
@@ -1177,18 +1192,28 @@ class BarcodeMergerApp:
             )
             self.update_preview()
 
-        self.root.after(0, on_complete_ui)
+        if not self.is_closing:
+            try:
+                self.root.after(0, on_complete_ui)
+            except tk.TclError:
+                pass
 
     def _on_merge_error(self, error_message: str) -> None:
         """合并错误回调"""
 
         def on_error_ui():
+            if self.is_closing:
+                return
             self.log("=" * 60)
             self.log(f"Merge failed: {error_message}")
             self.log("=" * 60)
             messagebox.showerror(APP_TITLE, f"Merge failed:\n{error_message}")
 
-        self.root.after(0, on_error_ui)
+        if not self.is_closing:
+            try:
+                self.root.after(0, on_error_ui)
+            except tk.TclError:
+                pass
 
 
 def main():

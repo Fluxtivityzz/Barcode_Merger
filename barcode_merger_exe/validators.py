@@ -139,4 +139,12 @@ class ParamValidator:
         barcode_pdf = ParamValidator.validate_file_path(barcode_pdf)
         output_pdf = ParamValidator.validate_output_path(output_pdf)
 
+        from pathlib import Path
+
+        output_path = Path(output_pdf).resolve()
+        if output_path == Path(base_pdf).resolve():
+            raise ValidationError("Output PDF must be different from Base PDF")
+        if output_path == Path(barcode_pdf).resolve():
+            raise ValidationError("Output PDF must be different from Barcode PDF")
+
         return base_pdf, barcode_pdf, output_pdf
