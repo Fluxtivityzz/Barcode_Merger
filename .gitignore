@@ -13,6 +13,13 @@ env/
 build/
 dist/
 *.spec
+*.toc
+*.pkg
+*.pyz
+base_library.zip
+warn-*.txt
+xref-*.html
+localpycs/
 
 # Logs
 *.log
@@ -24,3 +31,5 @@ dist/
 # System files
 .DS_Store
 Thumbs.db
+
+*.exe
