@@ -77,7 +77,7 @@ class MergePDFWorker(threading.Thread):
             out = fitz.open()
 
             total_barcode_pages = len(barcodes)
-            self.on_progress(0, total_barcode_pages, f"Starting process, {total_barcode_pages} pages total")
+            self.on_progress(0, total_barcode_pages, f"开始处理，共 {total_barcode_pages} 页")
 
             skip_keyword_normalized = normalize_text(self.skip_keyword)
             valid_indices = []
@@ -90,18 +90,18 @@ class MergePDFWorker(threading.Thread):
                     valid_indices.append(i)
 
             if len(base) == 0:
-                raise ValueError("Base PDF has no pages")
+                raise ValueError("底板 PDF 没有页面")
             if len(barcodes) == 0:
-                raise ValueError("Barcode PDF has no pages")
+                raise ValueError("条码 PDF 没有页面")
             if not valid_indices:
-                raise ValueError("No valid barcode page found")
+                raise ValueError("没有找到可合并的条码页面")
             allowed_base_page_counts = {1, total_barcode_pages, len(valid_indices)}
             if len(base) not in allowed_base_page_counts:
                 raise ValueError(
-                    "Base PDF page count must be 1 page as a reusable template "
-                    f"or match the barcode page count ({total_barcode_pages}) "
-                    f"or valid barcode page count ({len(valid_indices)}). "
-                    f"Current base pages: {len(base)}."
+                    "底板 PDF 页数必须为 1 页（作为通用模板），"
+                    f"或与条码 PDF 总页数一致（{total_barcode_pages} 页），"
+                    f"或与未跳过的条码页数一致（{len(valid_indices)} 页）。"
+                    f"当前底板 PDF 页数：{len(base)} 页。"
                 )
 
             removed_count = 0
@@ -111,7 +111,7 @@ class MergePDFWorker(threading.Thread):
             for i in range(total_barcode_pages):
                 # 检查停止标志
                 if self._stop_event.is_set():
-                    raise InterruptedError("Operation interrupted by user")
+                    raise InterruptedError("操作已被用户中断")
 
                 page_number = i + 1
                 barcode_page = barcodes[i]
@@ -119,7 +119,7 @@ class MergePDFWorker(threading.Thread):
                 # 检查跳过关键词
                 if i not in valid_index_set:
                     removed_count += 1
-                    self.on_progress(i, total_barcode_pages, f"Skipped: page {page_number}")
+                    self.on_progress(i, total_barcode_pages, f"已跳过：第 {page_number} 页")
                     continue
 
                 # 执行合并
@@ -136,10 +136,10 @@ class MergePDFWorker(threading.Thread):
                 merged_count += 1
 
                 self.on_progress(i, total_barcode_pages, 
-                               f"Merging: page {page_number} with base page {base_page_index + 1} ({merged_count} merged)")
+                               f"正在合并：条码第 {page_number} 页 + 底板第 {base_page_index + 1} 页（已合并 {merged_count} 页）")
 
             # 保存输出
-            self.on_progress(total_barcode_pages, total_barcode_pages, "Saving PDF...")
+            self.on_progress(total_barcode_pages, total_barcode_pages, "正在保存 PDF...")
             out_path = Path(self.output_pdf)
             temp_path = out_path.with_name(
                 f".{out_path.stem}.{uuid.uuid4().hex}.tmp{out_path.suffix}"

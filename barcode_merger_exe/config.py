@@ -3,7 +3,7 @@
 """
 
 # ============ 应用基本信息 ============
-APP_TITLE = "Barcode_Merger"
+APP_TITLE = "条码合并工具"
 SKIP_KEYWORD = "前后规格不同，请不要贴错"
 
 # ============ 窗口尺寸 ============
@@ -83,6 +83,15 @@ PARAM_RANGES = {
     },
 }
 
+# ============ 参数显示名称 ============
+PARAM_LABELS = {
+    'barcode_width_ratio': '条码宽度比例',
+    'bottom_margin': '底部边距',
+    'max_barcode_height': '条码最大高度',
+    'x_offset': '水平偏移',
+    'y_offset': '垂直偏移',
+}
+
 # ============ 默认参数值 ============
 DEFAULT_PARAMS = {
     'barcode_width_ratio': '0.60',
@@ -98,7 +107,7 @@ CONFIG_FILENAME = 'settings.json'
 CONFIG_DIR_NAME = 'BarcodeMergerPro'
 
 # ============ 预览相关 ============
-PREVIEW_ZOOM_MODES = ['Fit Page', 'Fit Width', '25%', '50%', '75%', '100%', '150%', '200%', '300%']
+PREVIEW_ZOOM_MODES = ['适应整页', '适应宽度', '25%', '50%', '75%', '100%', '150%', '200%', '300%']
 PREVIEW_UPDATE_DELAY = 350  # ms
 SETTINGS_SAVE_DELAY = 300  # ms
 PREVIEW_CACHE_MAX_SIZE = 2  # 最多缓存2个文档对
@@ -113,8 +122,8 @@ PDF_COMPRESSION = {
 LOG_HEIGHT = 10  # 行数
 
 # ============ 参数说明文本 ============
-PARAM_HINTS = """barcode_width_ratio step: 0.01
-bottom_margin / max_height / offsets step: 1
-bottom_margin larger = move up
-y_offset positive = move down
-x_offset positive = move right"""
+PARAM_HINTS = """条码宽度比例步长：0.01
+底部边距 / 最大高度 / 偏移步长：1
+底部边距越大，条码越靠上
+垂直偏移为正，条码向下移动
+水平偏移为正，条码向右移动"""

@@ -16,6 +16,7 @@ from config import (
     FONTS,
     UI_PADDING,
     PARAM_RANGES,
+    PARAM_LABELS,
     DEFAULT_PARAMS,
     CONFIG_FILENAME,
     CONFIG_DIR_NAME,
@@ -70,8 +71,8 @@ def desktop_default_file() -> str:
 
     for folder in candidates:
         if folder.exists():
-            return str(folder / "merged.pdf")
-    return str(Path.cwd() / "merged.pdf")
+            return str(folder / "合并结果.pdf")
+    return str(Path.cwd() / "合并结果.pdf")
 
 
 def app_config_file() -> Path:
@@ -177,19 +178,19 @@ class BarcodeMergerApp:
         self.y_offset_var = tk.StringVar(value=self.saved_params["y_offset"])
         self.skip_keyword_var = tk.StringVar(value=self.saved_params["skip_keyword"])
 
-        self.preview_zoom_var = tk.StringVar(value="Fit Page")
+        self.preview_zoom_var = tk.StringVar(value="适应整页")
         self.preview_page_var = tk.IntVar(value=1)
-        self.preview_page_text_var = tk.StringVar(value="Page 0 / 0")
-        self.preview_detail_var = tk.StringVar(value="Select files to preview")
+        self.preview_page_text_var = tk.StringVar(value="第 0 页 / 共 0 页")
+        self.preview_detail_var = tk.StringVar(value="请选择文件后预览")
 
         self.setup_style()
         self.build_ui()
         self.bind_param_autosave()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.log("Application started")
-        self.log(f"Default output: {self.output_pdf_var.get()}")
-        self.log(f"Loaded settings from: {app_config_file()}")
-        self.log(f"Window size: {self.root.winfo_width()} x {self.root.winfo_height()}")
+        self.log("程序已启动")
+        self.log(f"默认输出文件：{self.output_pdf_var.get()}")
+        self.log(f"已加载设置：{app_config_file()}")
+        self.log(f"窗口大小：{self.root.winfo_width()} x {self.root.winfo_height()}")
 
     def setup_style(self) -> None:
         # 从配置中获取颜色
@@ -369,7 +370,7 @@ class BarcodeMergerApp:
             )
         except Exception as exc:
             if hasattr(self, "log_text"):
-                self.log(f"Error saving settings: {exc}")
+                self.log(f"保存设置失败：{exc}")
 
     def build_ui(self) -> None:
         main = ttk.Frame(self.root, style="TFrame")
@@ -441,14 +442,14 @@ class BarcodeMergerApp:
         self.root.unbind_all("<Button-5>")
 
     def build_control_panel(self, parent: ttk.Frame) -> None:
-        ttk.Label(parent, text="PDF Barcode Merger", style="Title.TLabel").pack(
+        ttk.Label(parent, text="PDF 条码合并工具", style="Title.TLabel").pack(
             anchor="w",
             padx=UI_PADDING["outer"],
             pady=(UI_PADDING["outer"], UI_PADDING["tiny"]),
         )
         tk.Label(
             parent,
-            text="Select files, adjust placement, preview, then merge.",
+            text="选择文件，调整条码位置，预览无误后合并。",
             bg=COLORS["panel"],
             fg=COLORS["muted"],
             justify="left",
@@ -462,23 +463,23 @@ class BarcodeMergerApp:
             pady=(0, UI_PADDING["outer"]),
         )
 
-        self.section(parent, "Files")
-        self.file_row(parent, "Base PDF", self.base_pdf_var, self.choose_base_pdf)
+        self.section(parent, "文件")
+        self.file_row(parent, "底板 PDF", self.base_pdf_var, self.choose_base_pdf)
         self.file_row(
-            parent, "Barcode PDF", self.barcode_pdf_var, self.choose_barcode_pdf
+            parent, "条码 PDF", self.barcode_pdf_var, self.choose_barcode_pdf
         )
         self.file_row(
-            parent, "Output PDF", self.output_pdf_var, self.choose_output_pdf
+            parent, "输出 PDF", self.output_pdf_var, self.choose_output_pdf
         )
 
-        self.section(parent, "Barcode Settings")
+        self.section(parent, "条码设置")
 
         # 使用PARAM_RANGES动态构建参数行
         for param_name, config in PARAM_RANGES.items():
             var = getattr(self, f"{param_name}_var")
             self.param_row(
                 parent,
-                param_name,
+                PARAM_LABELS.get(param_name, param_name),
                 var,
                 config["min"],
                 config["max"],
@@ -487,10 +488,10 @@ class BarcodeMergerApp:
             )
 
         # 添加筛选关键词输入框
-        self.section(parent, "Filter Settings")
+        self.section(parent, "筛选设置")
         frame = ttk.Frame(parent, style="Panel.TFrame")
         frame.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
-        ttk.Label(frame, text="Skip Keyword", style="Muted.TLabel").pack(
+        ttk.Label(frame, text="跳过关键词", style="Muted.TLabel").pack(
             anchor="w", pady=(0, UI_PADDING["tiny"])
         )
         row = ttk.Frame(frame, style="Panel.TFrame")
@@ -523,13 +524,13 @@ class BarcodeMergerApp:
         )
 
         ttk.Button(
-            btn_frame, text="Clear Selected Files", command=self.clear_selected_files
+            btn_frame, text="清空已选文件", command=self.clear_selected_files
         ).pack(fill="x", pady=(0, UI_PADDING["small"]))
-        ttk.Button(btn_frame, text="Refresh Preview", command=self.update_preview).pack(
+        ttk.Button(btn_frame, text="刷新预览", command=self.update_preview).pack(
             fill="x", pady=(0, UI_PADDING["small"])
         )
         ttk.Button(
-            btn_frame, text="Merge PDF", style="Accent.TButton", command=self.merge_pdf
+            btn_frame, text="合并 PDF", style="Accent.TButton", command=self.merge_pdf
         ).pack(fill="x")
 
     def build_preview_panel(self, parent: ttk.Frame) -> None:
@@ -542,7 +543,7 @@ class BarcodeMergerApp:
             padx=UI_PADDING["outer"],
             pady=(UI_PADDING["small"], UI_PADDING["tiny"]),
         )
-        ttk.Label(top, text="Live Preview", style="Title.TLabel").pack(side="left")
+        ttk.Label(top, text="实时预览", style="Title.TLabel").pack(side="left")
         ttk.Label(
             top, textvariable=self.preview_page_text_var, style="Status.TLabel"
         ).pack(side="right")
@@ -554,7 +555,7 @@ class BarcodeMergerApp:
             pady=(UI_PADDING["tiny"], UI_PADDING["small"]),
         )
 
-        ttk.Label(controls, text="Zoom", style="Muted.TLabel").pack(
+        ttk.Label(controls, text="缩放", style="Muted.TLabel").pack(
             side="left", padx=(0, UI_PADDING["small"])
         )
         zoom_box = ttk.Combobox(
@@ -567,7 +568,7 @@ class BarcodeMergerApp:
         zoom_box.pack(side="left", padx=(0, UI_PADDING["inner"]))
         zoom_box.bind("<<ComboboxSelected>>", lambda event: self.update_preview())
 
-        ttk.Button(controls, text="Prev", command=self.prev_preview_page).pack(
+        ttk.Button(controls, text="上一页", command=self.prev_preview_page).pack(
             side="left", padx=(0, UI_PADDING["tiny"])
         )
         self.preview_page_spin = ttk.Entry(
@@ -582,7 +583,7 @@ class BarcodeMergerApp:
         self.preview_page_spin.bind(
             "<FocusOut>", lambda event: self.preview_page_changed()
         )
-        ttk.Button(controls, text="Next", command=self.next_preview_page).pack(
+        ttk.Button(controls, text="下一页", command=self.next_preview_page).pack(
             side="left", padx=(0, UI_PADDING["inner"])
         )
 
@@ -626,7 +627,7 @@ class BarcodeMergerApp:
             ),
         )
         self.preview_canvas.bind("<Leave>", lambda event: self.unbind_mousewheel())
-        self.draw_preview_placeholder("Select Base PDF and Barcode PDF")
+        self.draw_preview_placeholder("请选择底板 PDF 和条码 PDF")
 
     def build_log_panel(self, parent: ttk.Frame) -> None:
         log_panel = ttk.Frame(parent, style="Panel.TFrame")
@@ -638,8 +639,8 @@ class BarcodeMergerApp:
             padx=UI_PADDING["outer"],
             pady=(UI_PADDING["small"], UI_PADDING["tiny"]),
         )
-        ttk.Label(header, text="Console Output", style="Title.TLabel").pack(side="left")
-        ttk.Button(header, text="Clear", command=self.clear_log).pack(side="right")
+        ttk.Label(header, text="运行日志", style="Title.TLabel").pack(side="left")
+        ttk.Button(header, text="清空", command=self.clear_log).pack(side="right")
 
         text_frame = ttk.Frame(log_panel, style="Panel.TFrame")
         text_frame.pack(
@@ -700,7 +701,7 @@ class BarcodeMergerApp:
         row.pack(fill="x")
         entry = ttk.Entry(row, textvariable=var)
         entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse", command=command).pack(
+        ttk.Button(row, text="浏览", command=command).pack(
             side="left", padx=(UI_PADDING["small"], 0)
         )
 
@@ -775,44 +776,44 @@ class BarcodeMergerApp:
         self.preview_page_var.set(1)
         self.valid_barcode_indices = []
         self.preview_image = None
-        self.draw_preview_placeholder("Select Base PDF and Barcode PDF")
-        self.log("Selected files cleared")
-        self.log(f"Output PDF reset to default: {self.output_pdf_var.get()}")
+        self.draw_preview_placeholder("请选择底板 PDF 和条码 PDF")
+        self.log("已清空选择的文件")
+        self.log(f"输出 PDF 已重置为默认路径：{self.output_pdf_var.get()}")
 
     def choose_base_pdf(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select Base PDF", filetypes=[("PDF files", "*.pdf")]
+            title="选择底板 PDF", filetypes=[("PDF 文件", "*.pdf")]
         )
         if path:
             self.base_pdf_var.set(path)
             self.preview_page_var.set(1)
-            self.log(f"Base PDF selected: {path}")
+            self.log(f"已选择底板 PDF：{path}")
             self.update_preview()
 
     def choose_barcode_pdf(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select Barcode PDF", filetypes=[("PDF files", "*.pdf")]
+            title="选择条码 PDF", filetypes=[("PDF 文件", "*.pdf")]
         )
         if path:
             self.barcode_pdf_var.set(path)
             self.preview_page_var.set(1)
-            self.log(f"Barcode PDF selected: {path}")
+            self.log(f"已选择条码 PDF：{path}")
             self.update_preview()
 
     def choose_output_pdf(self) -> None:
         current = self.output_pdf_var.get().strip()
         initial_dir = str(Path(current).parent) if current else str(Path.home())
-        initial_file = Path(current).name if current else "merged.pdf"
+        initial_file = Path(current).name if current else "合并结果.pdf"
         path = filedialog.asksaveasfilename(
-            title="Select Output PDF",
+            title="选择输出 PDF",
             initialdir=initial_dir,
             initialfile=initial_file,
             defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
+            filetypes=[("PDF 文件", "*.pdf")],
         )
         if path:
             self.output_pdf_var.set(path)
-            self.log(f"Output PDF selected: {path}")
+            self.log(f"已选择输出 PDF：{path}")
 
     def log(self, message: str) -> None:
         print(message)
@@ -840,7 +841,7 @@ class BarcodeMergerApp:
             fill=COLORS["muted"],
             font=FONTS["placeholder"],
         )
-        self.preview_page_text_var.set("Page 0 / 0")
+        self.preview_page_text_var.set("第 0 页 / 共 0 页")
         self.preview_detail_var.set(text)
 
     def schedule_preview(self) -> None:
@@ -861,7 +862,7 @@ class BarcodeMergerApp:
             }
             return ParamValidator.validate_all_params(params_dict)
         except ValidationError as e:
-            raise ValueError(f"Parameter validation failed: {str(e)}")
+            raise ValueError(f"参数验证失败：{str(e)}")
 
     def calculate_rect(
         self, base_page: fitz.Page, barcode_page: fitz.Page, params: Dict[str, float]
@@ -904,10 +905,10 @@ class BarcodeMergerApp:
         if len(base) in {1, total_barcode_count, valid_barcode_count}:
             return None
         return (
-            "Base PDF page count must be 1 page as a reusable template "
-            f"or match the barcode page count ({total_barcode_count}) "
-            f"or valid barcode page count ({valid_barcode_count}). "
-            f"Current base pages: {len(base)}."
+            "底板 PDF 页数必须为 1 页（作为通用模板），"
+            f"或与条码 PDF 总页数一致（{total_barcode_count} 页），"
+            f"或与未跳过的条码页数一致（{valid_barcode_count} 页）。"
+            f"当前底板 PDF 页数：{len(base)} 页。"
         )
 
     def get_base_page_index(
@@ -927,13 +928,13 @@ class BarcodeMergerApp:
         base_pdf = self.base_pdf_var.get().strip()
         barcode_pdf = self.barcode_pdf_var.get().strip()
         if not base_pdf or not barcode_pdf:
-            self.draw_preview_placeholder("Select Base PDF and Barcode PDF")
+            self.draw_preview_placeholder("请选择底板 PDF 和条码 PDF")
             return None, None
         if not Path(base_pdf).exists():
-            self.draw_preview_placeholder("Base PDF not found")
+            self.draw_preview_placeholder("找不到底板 PDF")
             return None, None
         if not Path(barcode_pdf).exists():
-            self.draw_preview_placeholder("Barcode PDF not found")
+            self.draw_preview_placeholder("找不到条码 PDF")
             return None, None
         return base_pdf, barcode_pdf
 
@@ -992,9 +993,9 @@ class BarcodeMergerApp:
         canvas_w = max(self.preview_canvas.winfo_width() - 24, 100)
         canvas_h = max(self.preview_canvas.winfo_height() - 24, 100)
 
-        if mode == "Fit Width":
+        if mode == "适应宽度":
             zoom = canvas_w / page_rect.width
-        elif mode == "Fit Page":
+        elif mode == "适应整页":
             zoom = min(canvas_w / page_rect.width, canvas_h / page_rect.height)
         elif mode.endswith("%"):
             try:
@@ -1021,17 +1022,17 @@ class BarcodeMergerApp:
             barcodes = self.preview_cache.load_or_open(barcode_pdf)
 
             if len(base) == 0:
-                self.draw_preview_placeholder("Base PDF has no pages")
+                self.draw_preview_placeholder("底板 PDF 没有页面")
                 return
             if len(barcodes) == 0:
-                self.draw_preview_placeholder("Barcode PDF has no pages")
+                self.draw_preview_placeholder("条码 PDF 没有页面")
                 return
 
             self.valid_barcode_indices, skipped_pages = self.get_valid_barcode_indices(
                 barcodes
             )
             if not self.valid_barcode_indices:
-                self.draw_preview_placeholder("No valid barcode page found")
+                self.draw_preview_placeholder("没有找到可合并的条码页面")
                 return
             base_page_count_error = self.validate_base_page_count(
                 base, len(barcodes), len(self.valid_barcode_indices)
@@ -1081,21 +1082,21 @@ class BarcodeMergerApp:
             )
 
             self.preview_page_text_var.set(
-                f"Page {preview_page_number} / {len(self.valid_barcode_indices)}"
+                f"第 {preview_page_number} 页 / 共 {len(self.valid_barcode_indices)} 页"
             )
             skipped_count = len(skipped_pages)
             self.preview_detail_var.set(
-                f"Source barcode page {barcode_index + 1} / {len(barcodes)} | "
-                f"Base page {base_page_index + 1} / {len(base)} | "
-                f"Skipped {skipped_count} page(s) | "
-                f"zoom {zoom * 100:.0f}% | "
-                f"width {target_w:.2f}, height {target_h:.2f} | "
-                f"left {target_rect.x0:.2f}, top {target_rect.y0:.2f}, right {target_rect.x1:.2f}, bottom {target_rect.y1:.2f}"
+                f"条码源页 {barcode_index + 1} / {len(barcodes)} | "
+                f"底板页 {base_page_index + 1} / {len(base)} | "
+                f"已跳过 {skipped_count} 页 | "
+                f"缩放 {zoom * 100:.0f}% | "
+                f"宽 {target_w:.2f}，高 {target_h:.2f} | "
+                f"左 {target_rect.x0:.2f}，上 {target_rect.y0:.2f}，右 {target_rect.x1:.2f}，下 {target_rect.y1:.2f}"
             )
 
         except Exception as exc:
             self.draw_preview_placeholder(str(exc))
-            self.log(f"Preview failed: {exc}")
+            self.log(f"预览失败：{exc}")
         finally:
             if temp:
                 try:
@@ -1106,7 +1107,7 @@ class BarcodeMergerApp:
     def merge_pdf(self) -> None:
         # 检查是否已有合并任务运行
         if self.merge_thread and self.merge_thread.is_running():
-            messagebox.showwarning(APP_TITLE, "Already processing PDF. Please wait...")
+            messagebox.showwarning(APP_TITLE, "正在处理 PDF，请稍候...")
             return
 
         # 验证文件和参数
@@ -1121,24 +1122,24 @@ class BarcodeMergerApp:
             params = self.get_params()
         except (ValidationError, ValueError) as exc:
             messagebox.showerror(APP_TITLE, str(exc))
-            self.log(f"Validation failed: {exc}")
+            self.log(f"验证失败：{exc}")
             return
 
         # 输出开始日志
         self.log("=" * 60)
-        self.log("Starting PDF merge (processing in background)")
+        self.log("开始合并 PDF（后台处理中）")
         self.log("=" * 60)
-        self.log(f"Base PDF: {base_pdf}")
-        self.log(f"Barcode PDF: {barcode_pdf}")
-        self.log(f"Output PDF: {output_pdf}")
-        self.log(f"Skip keyword: {self.skip_keyword_var.get()}")
+        self.log(f"底板 PDF：{base_pdf}")
+        self.log(f"条码 PDF：{barcode_pdf}")
+        self.log(f"输出 PDF：{output_pdf}")
+        self.log(f"跳过关键词：{self.skip_keyword_var.get()}")
         self.log("-" * 60)
-        self.log("Current barcode settings:")
-        self.log(f"  Barcode width ratio: {params['barcode_width_ratio']}")
-        self.log(f"  Bottom margin: {params['bottom_margin']}")
-        self.log(f"  Max barcode height: {params['max_barcode_height']}")
-        self.log(f"  X offset: {params['x_offset']}")
-        self.log(f"  Y offset: {params['y_offset']}")
+        self.log("当前条码设置：")
+        self.log(f"  条码宽度比例：{params['barcode_width_ratio']}")
+        self.log(f"  底部边距：{params['bottom_margin']}")
+        self.log(f"  条码最大高度：{params['max_barcode_height']}")
+        self.log(f"  水平偏移：{params['x_offset']}")
+        self.log(f"  垂直偏移：{params['y_offset']}")
         self.log("-" * 60)
 
         # 创建并启动后台工作线程
@@ -1170,25 +1171,25 @@ class BarcodeMergerApp:
             if self.is_closing:
                 return
             self.log("=" * 60)
-            self.log("Merge completed successfully")
+            self.log("PDF 合并完成")
             self.log("=" * 60)
-            self.log(f"Total barcode pages: {result['total_pages']}")
-            self.log(f"Pages merged: {result['merged_count']}")
-            self.log(f"Pages skipped: {result['skipped_count']}")
+            self.log(f"条码 PDF 总页数：{result['total_pages']}")
+            self.log(f"已合并页数：{result['merged_count']}")
+            self.log(f"已跳过页数：{result['skipped_count']}")
 
             if result["skipped_pages"]:
-                self.log(f"Skipped page numbers: {result['skipped_pages']}")
+                self.log(f"跳过的页码：{result['skipped_pages']}")
             else:
-                self.log("No pages matched the skip keyword")
+                self.log("没有页面匹配跳过关键词")
 
-            self.log(f"Output file: {result['output_path']}")
+            self.log(f"输出文件：{result['output_path']}")
             self.log("=" * 60)
 
             messagebox.showinfo(
                 APP_TITLE,
-                f"PDF merged successfully:\n{result['output_path']}\n\n"
-                f"Merged: {result['merged_count']} pages\n"
-                f"Skipped: {result['skipped_count']} pages",
+                f"PDF 合并成功：\n{result['output_path']}\n\n"
+                f"已合并：{result['merged_count']} 页\n"
+                f"已跳过：{result['skipped_count']} 页",
             )
             self.update_preview()
 
@@ -1205,9 +1206,9 @@ class BarcodeMergerApp:
             if self.is_closing:
                 return
             self.log("=" * 60)
-            self.log(f"Merge failed: {error_message}")
+            self.log(f"合并失败：{error_message}")
             self.log("=" * 60)
-            messagebox.showerror(APP_TITLE, f"Merge failed:\n{error_message}")
+            messagebox.showerror(APP_TITLE, f"合并失败：\n{error_message}")
 
         if not self.is_closing:
             try:

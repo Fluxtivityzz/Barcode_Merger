@@ -2,7 +2,7 @@
 参数验证与处理
 """
 from typing import Dict, Union, Tuple
-from config import PARAM_RANGES
+from config import PARAM_LABELS, PARAM_RANGES
 
 
 class ValidationError(Exception):
@@ -28,12 +28,14 @@ class ParamValidator:
             ValidationError: 验证失败
         """
         if name not in PARAM_RANGES:
-            raise ValidationError(f"Unknown parameter: {name}")
+            raise ValidationError(f"未知参数：{name}")
+
+        display_name = PARAM_LABELS.get(name, name)
 
         try:
             fvalue = float(value)
         except (ValueError, TypeError):
-            raise ValidationError(f"{name} must be a number, current value: {value}")
+            raise ValidationError(f"{display_name} 必须是数字，当前值：{value}")
 
         param_config = PARAM_RANGES[name]
         min_val = param_config['min']
@@ -41,7 +43,7 @@ class ParamValidator:
 
         if not (min_val <= fvalue <= max_val):
             raise ValidationError(
-                f"{name} out of range [{min_val}, {max_val}], current value: {fvalue}"
+                f"{display_name} 超出范围 [{min_val}, {max_val}]，当前值：{fvalue}"
             )
 
         return fvalue
@@ -77,14 +79,14 @@ class ParamValidator:
         from pathlib import Path
 
         if not path or not isinstance(path, str):
-            raise ValidationError("Invalid or empty file path")
+            raise ValidationError("文件路径无效或为空")
 
         p = Path(path.strip())
         if not p.exists():
-            raise ValidationError(f"File does not exist: {path}")
+            raise ValidationError(f"文件不存在：{path}")
 
         if not p.is_file():
-            raise ValidationError(f"Not a file: {path}")
+            raise ValidationError(f"不是有效文件：{path}")
 
         return str(p)
 
@@ -104,7 +106,7 @@ class ParamValidator:
         from pathlib import Path
 
         if not path or not isinstance(path, str):
-            raise ValidationError("Invalid or empty output path")
+            raise ValidationError("输出路径无效或为空")
 
         p = Path(path.strip())
         
@@ -112,7 +114,7 @@ class ParamValidator:
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            raise ValidationError(f"Failed to create output directory: {e}")
+            raise ValidationError(f"创建输出目录失败：{e}")
 
         # 确保 .pdf 扩展名
         if p.suffix.lower() != '.pdf':
@@ -143,8 +145,8 @@ class ParamValidator:
 
         output_path = Path(output_pdf).resolve()
         if output_path == Path(base_pdf).resolve():
-            raise ValidationError("Output PDF must be different from Base PDF")
+            raise ValidationError("输出 PDF 不能与底板 PDF 相同")
         if output_path == Path(barcode_pdf).resolve():
-            raise ValidationError("Output PDF must be different from Barcode PDF")
+            raise ValidationError("输出 PDF 不能与条码 PDF 相同")
 
         return base_pdf, barcode_pdf, output_pdf

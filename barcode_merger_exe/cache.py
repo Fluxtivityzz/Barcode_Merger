@@ -110,7 +110,7 @@ class PreviewCache:
             self.put(path, doc)
             return doc
         except Exception as e:
-            raise Exception(f"Failed to open PDF file {path}: {e}")
+            raise Exception(f"打开 PDF 文件失败：{path}，原因：{e}")
 
     def _evict_lru(self) -> None:
         """驱逐最少最近使用的文档"""
