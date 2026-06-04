@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Dict, Tuple, List, Any
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox
 
 import fitz
@@ -38,6 +39,21 @@ from cache import PreviewCache
 from worker import MergePDFWorker
 
 
+PREFERRED_UI_FONTS = (
+    "PingFang SC",
+    "PingFang",
+    "苹方-简",
+    "苹方",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "微软雅黑",
+)
+
+SINGLE_INSTANCE_MUTEX_NAME = "Local\\BarcodeMergerSingleInstance"
+ERROR_ALREADY_EXISTS = 183
+single_instance_handle = None
+
+
 def enable_high_dpi_awareness():
     if not sys.platform.startswith("win"):
         return
@@ -57,8 +73,78 @@ def enable_high_dpi_awareness():
         pass
 
 
+def acquire_single_instance() -> bool:
+    global single_instance_handle
+    if not sys.platform.startswith("win"):
+        return True
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.GetLastError.restype = ctypes.c_ulong
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_bool
+
+    handle = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX_NAME)
+    if not handle:
+        return True
+
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return False
+
+    single_instance_handle = handle
+    return True
+
+
+def release_single_instance() -> None:
+    global single_instance_handle
+    if single_instance_handle and sys.platform.startswith("win"):
+        try:
+            ctypes.windll.kernel32.CloseHandle(single_instance_handle)
+        except Exception:
+            pass
+    single_instance_handle = None
+
+
+def show_single_instance_notice() -> None:
+    message = "条码合并工具已经在运行，请勿重复打开。"
+    if sys.platform.startswith("win"):
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, APP_TITLE, 0x40)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
 def normalize_text(text: Optional[str]) -> str:
     return re.sub(r"\s+", "", text or "")
+
+
+def choose_available_font(root: tk.Tk, candidates: Tuple[str, ...]) -> Optional[str]:
+    available = {name.casefold(): name for name in tkfont.families(root)}
+    for candidate in candidates:
+        font_name = available.get(candidate.casefold())
+        if font_name:
+            return font_name
+    return None
+
+
+def apply_preferred_fonts(root: tk.Tk) -> None:
+    ui_font = choose_available_font(root, PREFERRED_UI_FONTS) or "Microsoft YaHei"
+    FONTS.update(
+        {
+            "default": (ui_font, 10),
+            "semibold": (ui_font, 10, "bold"),
+            "title": (ui_font, 15, "bold"),
+            "section": (ui_font, 10, "bold"),
+            "status": (ui_font, 9),
+            "muted": (ui_font, 9),
+            "mono": (ui_font, 9),
+            "placeholder": (ui_font, 13),
+        }
+    )
 
 
 def desktop_default_file() -> str:
@@ -73,6 +159,11 @@ def desktop_default_file() -> str:
         if folder.exists():
             return str(folder / "合并结果.pdf")
     return str(Path.cwd() / "合并结果.pdf")
+
+
+def merged_output_for_barcode(barcode_pdf: str) -> str:
+    barcode_path = Path(barcode_pdf)
+    return str(barcode_path.with_name(f"{barcode_path.stem}_合并.pdf"))
 
 
 def app_config_file() -> Path:
@@ -796,8 +887,10 @@ class BarcodeMergerApp:
         )
         if path:
             self.barcode_pdf_var.set(path)
+            self.output_pdf_var.set(merged_output_for_barcode(path))
             self.preview_page_var.set(1)
             self.log(f"已选择条码 PDF：{path}")
+            self.log(f"输出 PDF 已自动设置为：{self.output_pdf_var.get()}")
             self.update_preview()
 
     def choose_output_pdf(self) -> None:
@@ -1219,9 +1312,17 @@ class BarcodeMergerApp:
 
 def main():
     enable_high_dpi_awareness()
+    if not acquire_single_instance():
+        show_single_instance_notice()
+        return
+
     root = tk.Tk()
+    apply_preferred_fonts(root)
     app = BarcodeMergerApp(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        release_single_instance()
 
 
 if __name__ == "__main__":
