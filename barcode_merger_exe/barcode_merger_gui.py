@@ -421,6 +421,14 @@ class BarcodeMergerApp:
     def setup_style(self) -> None:
         # 从配置中获取颜色
         c = COLORS
+        control_bg = "#252A34"
+        control_hover = "#303744"
+        control_active = "#384150"
+        input_bg = "#141922"
+        input_focus = "#1A202B"
+        accent_hover = "#E2C47B"
+        accent_active = "#C9A75E"
+        disabled_fg = "#6F7785"
 
         self.root.configure(bg=c["bg"])
         style = ttk.Style()
@@ -429,10 +437,11 @@ class BarcodeMergerApp:
         except tk.TclError:
             pass
 
-        self.root.option_add("*TCombobox*Listbox.background", "#E8E6DF")
-        self.root.option_add("*TCombobox*Listbox.foreground", "#000000")
+        self.root.option_add("*TCombobox*Listbox.background", control_bg)
+        self.root.option_add("*TCombobox*Listbox.foreground", c["text"])
         self.root.option_add("*TCombobox*Listbox.selectBackground", c["accent"])
-        self.root.option_add("*TCombobox*Listbox.selectForeground", "#000000")
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#111318")
+        self.root.option_add("*TCombobox*Listbox.borderWidth", 0)
 
         style.configure("TFrame", background=c["bg"])
         style.configure("Panel.TFrame", background=c["panel"])
@@ -463,63 +472,206 @@ class BarcodeMergerApp:
             foreground=c["accent"],
             font=FONTS["status"],
         )
-        style.configure("TButton", font=FONTS["default"], padding=(12, 7))
-        style.map("TButton", foreground=[("disabled", "#777777")])
-        style.configure("Accent.TButton", font=FONTS["semibold"], padding=(14, 8))
-        style.configure("Param.TButton", font=FONTS["semibold"], padding=(8, 5))
+        style.configure(
+            "TButton",
+            background=control_bg,
+            foreground=c["text"],
+            bordercolor=control_bg,
+            darkcolor=control_bg,
+            lightcolor=control_bg,
+            focuscolor=control_bg,
+            relief="flat",
+            font=FONTS["default"],
+            padding=(13, 8),
+        )
+        style.map(
+            "TButton",
+            background=[
+                ("disabled", "#20242B"),
+                ("pressed", control_active),
+                ("active", control_hover),
+            ],
+            foreground=[("disabled", disabled_fg)],
+            bordercolor=[
+                ("pressed", control_active),
+                ("active", control_hover),
+            ],
+            relief=[("pressed", "flat"), ("!pressed", "flat")],
+        )
+        style.configure(
+            "Accent.TButton",
+            background=c["accent"],
+            foreground="#111318",
+            bordercolor=c["accent"],
+            darkcolor=c["accent"],
+            lightcolor=c["accent"],
+            focuscolor=c["accent"],
+            relief="flat",
+            font=FONTS["semibold"],
+            padding=(14, 9),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[
+                ("disabled", "#6F654C"),
+                ("pressed", accent_active),
+                ("active", accent_hover),
+            ],
+            foreground=[("disabled", "#2A261D")],
+            bordercolor=[
+                ("pressed", accent_active),
+                ("active", accent_hover),
+            ],
+            relief=[("pressed", "flat"), ("!pressed", "flat")],
+        )
+        style.configure(
+            "Param.TButton",
+            background=control_bg,
+            foreground=c["text"],
+            bordercolor=control_bg,
+            darkcolor=control_bg,
+            lightcolor=control_bg,
+            focuscolor=control_bg,
+            relief="flat",
+            font=FONTS["semibold"],
+            padding=(8, 5),
+        )
+        style.map(
+            "Param.TButton",
+            background=[
+                ("disabled", "#20242B"),
+                ("pressed", control_active),
+                ("active", control_hover),
+            ],
+            foreground=[("disabled", disabled_fg)],
+            bordercolor=[
+                ("pressed", control_active),
+                ("active", control_hover),
+            ],
+            relief=[("pressed", "flat"), ("!pressed", "flat")],
+        )
         style.configure(
             "TEntry",
-            fieldbackground=c["input_bg"],
+            fieldbackground=input_bg,
+            background=input_bg,
             foreground=c["text"],
             insertcolor=c["text"],
-            padding=7,
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            relief="flat",
+            padding=(9, 8),
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("focus", input_focus)],
+            bordercolor=[("focus", c["accent"])],
+            lightcolor=[("focus", c["accent"])],
+            darkcolor=[("focus", c["accent"])],
         )
         style.configure(
             "TSpinbox",
-            fieldbackground=c["input_bg"],
+            fieldbackground=input_bg,
+            background=input_bg,
             foreground=c["text"],
             insertcolor=c["text"],
-            padding=7,
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            relief="flat",
+            padding=(9, 8),
             arrowsize=18,
         )
         style.configure(
             "TCombobox",
-            fieldbackground="#E8E6DF",
-            foreground="#000000",
-            selectforeground="#000000",
-            selectbackground="#E8E6DF",
-            arrowcolor="#000000",
-            padding=6,
+            fieldbackground=control_bg,
+            background=control_bg,
+            foreground=c["text"],
+            selectforeground=c["text"],
+            selectbackground=control_bg,
+            arrowcolor=c["muted"],
+            bordercolor=control_bg,
+            darkcolor=control_bg,
+            lightcolor=control_bg,
+            relief="flat",
+            padding=(10, 7),
         )
         style.map(
             "TCombobox",
-            fieldbackground=[("readonly", "#E8E6DF")],
-            foreground=[("readonly", "#000000")],
-            selectforeground=[("readonly", "#000000")],
-            selectbackground=[("readonly", "#E8E6DF")],
+            fieldbackground=[
+                ("readonly", control_bg),
+                ("focus", control_hover),
+                ("active", control_hover),
+            ],
+            background=[
+                ("readonly", control_bg),
+                ("pressed", control_active),
+                ("active", control_hover),
+            ],
+            foreground=[("readonly", c["text"])],
+            selectforeground=[("readonly", c["text"])],
+            selectbackground=[("readonly", control_bg)],
+            arrowcolor=[("active", c["text"]), ("readonly", c["muted"])],
+            bordercolor=[("focus", c["accent"]), ("active", control_hover)],
+        )
+        style.configure(
+            "Modern.TCheckbutton",
+            background=c["panel"],
+            foreground=c["text"],
+            focuscolor=c["panel"],
+            font=FONTS["default"],
+            padding=(0, 4),
+        )
+        style.map(
+            "Modern.TCheckbutton",
+            background=[("active", c["panel"])],
+            foreground=[("disabled", disabled_fg), ("active", c["text"])],
+            indicatorcolor=[
+                ("selected", c["accent"]),
+                ("pressed", control_active),
+                ("active", control_hover),
+                ("!selected", input_bg),
+            ],
+            indicatorrelief=[("pressed", "flat"), ("!pressed", "flat")],
         )
         style.configure(
             "Vertical.TScrollbar",
             gripcount=0,
-            background=c["panel_2"],
-            darkcolor=c["panel_2"],
-            lightcolor=c["panel_2"],
+            background=control_bg,
+            darkcolor=control_bg,
+            lightcolor=control_bg,
             troughcolor=c["bg"],
             bordercolor=c["bg"],
             arrowcolor=c["muted"],
+            relief="flat",
+            arrowsize=12,
         )
         style.configure(
             "Horizontal.TScrollbar",
             gripcount=0,
-            background=c["panel_2"],
-            darkcolor=c["panel_2"],
-            lightcolor=c["panel_2"],
+            background=control_bg,
+            darkcolor=control_bg,
+            lightcolor=control_bg,
             troughcolor=c["bg"],
             bordercolor=c["bg"],
             arrowcolor=c["muted"],
+            relief="flat",
+            arrowsize=12,
         )
         style.configure(
-            "Horizontal.TScale", background=c["panel"], troughcolor=c["panel_2"]
+            "Horizontal.TScale",
+            background=c["panel"],
+            troughcolor="#3A414D",
+            bordercolor=c["panel"],
+            darkcolor=c["panel"],
+            lightcolor=c["panel"],
+            sliderrelief="flat",
+            sliderthickness=18,
+        )
+        style.map(
+            "Horizontal.TScale",
+            background=[("active", c["accent"]), ("!active", c["muted"])],
+            troughcolor=[("active", "#454D5B"), ("!active", "#3A414D")],
         )
 
     def on_close(self) -> None:
@@ -617,9 +769,12 @@ class BarcodeMergerApp:
             orient="horizontal",
             bg=COLORS["bg"],
             bd=0,
-            sashwidth=8,
+            sashwidth=10,
             sashrelief="flat",
             showhandle=False,
+            handlepad=0,
+            handlesize=0,
+            opaqueresize=True,
         )
         self.main_pane.pack(fill="both", expand=True)
         self.main_pane.bind("<ButtonRelease-1>", lambda event: self.save_settings())
@@ -766,24 +921,7 @@ class BarcodeMergerApp:
         entry.bind("<FocusOut>", lambda event: self.update_preview())
 
         self.section(parent, "输出设置")
-        reverse_check = tk.Checkbutton(
-            parent,
-            text="逆序保存",
-            variable=self.reverse_save_var,
-            command=self.save_settings,
-            bg=COLORS["panel"],
-            fg=COLORS["text"],
-            activebackground=COLORS["panel"],
-            activeforeground=COLORS["text"],
-            selectcolor=COLORS["input_bg"],
-            font=FONTS["default"],
-            anchor="w",
-        )
-        reverse_check.pack(
-            fill="x",
-            padx=UI_PADDING["outer"],
-            pady=(0, UI_PADDING["small"]),
-        )
+        self.reverse_save_control(parent)
 
         hint = tk.Label(
             parent,
@@ -815,6 +953,70 @@ class BarcodeMergerApp:
         ttk.Button(
             btn_frame, text="合并 PDF", style="Accent.TButton", command=self.merge_pdf
         ).pack(fill="x")
+
+    def reverse_save_control(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
+
+        self.reverse_save_box = tk.Canvas(
+            row,
+            width=24,
+            height=24,
+            bg=COLORS["panel"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.reverse_save_box.pack(side="left", padx=(0, UI_PADDING["small"]))
+
+        label = tk.Label(
+            row,
+            text="逆序保存",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=FONTS["default"],
+            cursor="hand2",
+        )
+        label.pack(side="left", anchor="w")
+
+        for widget in (row, self.reverse_save_box, label):
+            widget.bind("<Button-1>", lambda event: self.toggle_reverse_save())
+
+        self.draw_reverse_save_box()
+
+    def toggle_reverse_save(self) -> None:
+        self.reverse_save_var.set(not self.reverse_save_var.get())
+        self.draw_reverse_save_box()
+        self.save_settings()
+
+    def draw_reverse_save_box(self) -> None:
+        if not hasattr(self, "reverse_save_box"):
+            return
+
+        c = COLORS
+        checked = self.reverse_save_var.get()
+        self.reverse_save_box.delete("all")
+        fill = c["input_bg"]
+        outline = c["accent"] if checked else c["border"]
+
+        self.reverse_save_box.create_rectangle(
+            2,
+            2,
+            22,
+            22,
+            fill=fill,
+            outline=outline,
+            width=2,
+        )
+        if checked:
+            self.reverse_save_box.create_rectangle(
+                7,
+                7,
+                17,
+                17,
+                fill=c["accent"],
+                outline=c["accent"],
+            )
 
     def build_preview_panel(self, parent: ttk.Frame) -> None:
         preview_panel = ttk.Frame(parent, style="Panel.TFrame")
@@ -1467,6 +1669,15 @@ class BarcodeMergerApp:
         if self.merge_thread and self.merge_thread.is_running():
             messagebox.showwarning(APP_TITLE, "正在处理 PDF，请稍候...")
             return
+
+        if self.reverse_save_var.get():
+            should_continue = messagebox.askyesno(
+                APP_TITLE,
+                "当前已勾选逆序保存，合并结果将按相反页序保存。\n\n是否继续合并？",
+            )
+            if not should_continue:
+                self.log("已取消合并：逆序保存确认未通过")
+                return
 
         # 验证文件和参数
         try:
