@@ -22,9 +22,10 @@ class MergePDFWorker(threading.Thread):
     通过回调函数向主线程报告进度
     """
 
-    def __init__(self, base_pdf: str, barcode_pdf: str, output_pdf: str, params: Dict[str, float], 
-                 on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None, 
-                 on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None) -> None:
+    def __init__(self, base_pdf: str, barcode_pdf: str, output_pdf: str, params: Dict[str, float],
+                 on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
+                 on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
+                 reverse_save: bool = False) -> None:
         """初始化工作线程
         
         Args:
@@ -36,6 +37,7 @@ class MergePDFWorker(threading.Thread):
             on_complete: 完成回调 (result)
             on_error: 错误回调 (error_message)
             skip_keyword: 跳过关键词 (如果为None则使用默认配置)
+            reverse_save: 是否按相反页序保存输出
         """
         super().__init__(daemon=False)
         
@@ -47,6 +49,7 @@ class MergePDFWorker(threading.Thread):
         self.on_complete = on_complete or (lambda *args: None)
         self.on_error = on_error or (lambda *args: None)
         self.skip_keyword = SKIP_KEYWORD if skip_keyword is None else skip_keyword
+        self.reverse_save = reverse_save
         
         self._stop_event = threading.Event()
         self.result = None
@@ -104,11 +107,31 @@ class MergePDFWorker(threading.Thread):
                     f"当前底板 PDF 页数：{len(base)} 页。"
                 )
 
-            removed_count = 0
-            merged_count = 0
             valid_index_set = set(valid_indices)
-
+            merge_jobs = []
             for i in range(total_barcode_pages):
+                if i not in valid_index_set:
+                    continue
+
+                if len(base) == 1:
+                    base_page_index = 0
+                elif len(base) == total_barcode_pages:
+                    base_page_index = i
+                else:
+                    base_page_index = len(merge_jobs)
+                merge_jobs.append((i, base_page_index))
+
+            removed_count = total_barcode_pages - len(merge_jobs)
+            merged_count = 0
+            if removed_count:
+                self.on_progress(
+                    0,
+                    total_barcode_pages,
+                    f"已跳过 {removed_count} 页：{removed_pages}",
+                )
+            output_jobs = list(reversed(merge_jobs)) if self.reverse_save else merge_jobs
+
+            for output_index, (i, base_page_index) in enumerate(output_jobs, start=1):
                 # 检查停止标志
                 if self._stop_event.is_set():
                     raise InterruptedError("操作已被用户中断")
@@ -116,27 +139,19 @@ class MergePDFWorker(threading.Thread):
                 page_number = i + 1
                 barcode_page = barcodes[i]
 
-                # 检查跳过关键词
-                if i not in valid_index_set:
-                    removed_count += 1
-                    self.on_progress(i, total_barcode_pages, f"已跳过：第 {page_number} 页")
-                    continue
-
                 # 执行合并
-                if len(base) == 1:
-                    base_page_index = 0
-                elif len(base) == total_barcode_pages:
-                    base_page_index = i
-                else:
-                    base_page_index = merged_count
                 out.insert_pdf(base, from_page=base_page_index, to_page=base_page_index)
                 page = out[-1]
                 target_rect = self._calculate_rect(page, barcode_page)
                 page.show_pdf_page(target_rect, barcodes, i)
                 merged_count += 1
 
-                self.on_progress(i, total_barcode_pages, 
-                               f"正在合并：条码第 {page_number} 页 + 底板第 {base_page_index + 1} 页（已合并 {merged_count} 页）")
+                self.on_progress(
+                    output_index,
+                    len(output_jobs),
+                    f"正在合并：条码第 {page_number} 页 + 底板第 {base_page_index + 1} 页"
+                    f"（输出第 {output_index} / {len(output_jobs)} 页）",
+                )
 
             # 保存输出
             self.on_progress(total_barcode_pages, total_barcode_pages, "正在保存 PDF...")
@@ -163,6 +178,7 @@ class MergePDFWorker(threading.Thread):
                 'merged_count': merged_count,
                 'skipped_count': removed_count,
                 'skipped_pages': removed_pages,
+                'reverse_save': self.reverse_save,
                 'output_path': self.output_pdf,
             }
 
@@ -216,7 +232,8 @@ class BatchMergePDFWorker(threading.Thread):
 
     def __init__(self, base_pdf: str, barcode_jobs: list, params: Dict[str, float],
                  on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
-                 on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None) -> None:
+                 on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
+                 reverse_save: bool = False) -> None:
         super().__init__(daemon=False)
 
         self.base_pdf = base_pdf
@@ -226,6 +243,7 @@ class BatchMergePDFWorker(threading.Thread):
         self.on_complete = on_complete or (lambda *args: None)
         self.on_error = on_error or (lambda *args: None)
         self.skip_keyword = SKIP_KEYWORD if skip_keyword is None else skip_keyword
+        self.reverse_save = reverse_save
         self._stop_event = threading.Event()
         self.result = None
         self.error = None
@@ -254,6 +272,7 @@ class BatchMergePDFWorker(threading.Thread):
                     on_progress=lambda current, total, message, idx=job_index, count=total_jobs:
                         self.on_progress(current, total, f"[{idx}/{count}] {message}"),
                     skip_keyword=self.skip_keyword,
+                    reverse_save=self.reverse_save,
                 )
                 worker._stop_event = self._stop_event
                 result = worker._merge_pdf()

@@ -100,6 +100,7 @@ DEFAULT_PARAMS = {
     'x_offset': '0',
     'y_offset': '0',
     'skip_keyword': SKIP_KEYWORD,
+    'reverse_save': '0',
 }
 
 # ============ 配置文件 ============

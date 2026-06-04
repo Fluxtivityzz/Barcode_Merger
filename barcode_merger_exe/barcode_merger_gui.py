@@ -203,12 +203,51 @@ def app_config_file() -> Path:
     return config_dir / CONFIG_FILENAME
 
 
+def current_dpi_scale(root: tk.Tk) -> float:
+    try:
+        return max(root.winfo_fpixels("1i") / 96.0, 1.0)
+    except Exception:
+        return 1.0
+
+
+def get_work_area(root: tk.Tk) -> Tuple[int, int, int, int]:
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    if not sys.platform.startswith("win"):
+        return 0, 0, screen_w, screen_h
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    rect = RECT()
+    try:
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            work_w = max(rect.right - rect.left, 1)
+            work_h = max(rect.bottom - rect.top, 1)
+            return rect.left, rect.top, work_w, work_h
+    except Exception:
+        pass
+    return 0, 0, screen_w, screen_h
+
+
+def clamp_int(value: int, minimum: int, maximum: int) -> int:
+    if maximum < minimum:
+        return minimum
+    return max(minimum, min(value, maximum))
+
+
 def load_saved_params() -> Dict[str, Optional[str]]:
     defaults = DEFAULT_PARAMS.copy()
     defaults.update(
         {
             "window_width": None,
             "window_height": None,
+            "main_pane_sash": None,
         }
     )
     path = app_config_file()
@@ -240,13 +279,16 @@ class BarcodeMergerApp:
         # 线程管理
         self.merge_thread = None
 
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        design_w = DESIGN_WINDOW_W
-        design_h = DESIGN_WINDOW_H
-        if screen_w < design_w + 80 or screen_h < design_h + 80:
-            design_w = min(DEFAULT_WINDOW_W, max(MIN_WINDOW_W, screen_w - 60))
-            design_h = min(DEFAULT_WINDOW_H, max(MIN_WINDOW_H, screen_h - 80))
+        try:
+            self.root.tk.call("tk", "scaling", self.root.winfo_fpixels("1i") / 72.0)
+        except Exception:
+            pass
+        self.dpi_scale = current_dpi_scale(self.root)
+        self.work_x, self.work_y, self.work_w, self.work_h = get_work_area(self.root)
+        startup_layout = self.calculate_startup_layout(self.work_w, self.work_h)
+        self.default_pane_sash = startup_layout["pane_sash"]
+        self.min_left_width = startup_layout["min_left_width"]
+        self.min_right_width = startup_layout["min_right_width"]
 
         saved_window_width = self.saved_params.get("window_width")
         saved_window_height = self.saved_params.get("window_height")
@@ -254,22 +296,28 @@ class BarcodeMergerApp:
             window_w = int(saved_window_width)
             window_h = int(saved_window_height)
         except (TypeError, ValueError):
-            window_w = design_w
-            window_h = design_h
+            window_w = startup_layout["window_width"]
+            window_h = startup_layout["window_height"]
 
-        window_w = max(design_w, min(window_w, max(screen_w - 40, design_w)))
-        window_h = max(design_h, min(window_h, max(screen_h - 80, design_h)))
+        window_w = clamp_int(
+            window_w,
+            startup_layout["min_window_width"],
+            startup_layout["max_window_width"],
+        )
+        window_h = clamp_int(
+            window_h,
+            startup_layout["min_window_height"],
+            startup_layout["max_window_height"],
+        )
 
-        pos_x = max((screen_w - window_w) // 2, 0)
-        pos_y = max((screen_h - window_h) // 2, 0)
+        pos_x = self.work_x + max((self.work_w - window_w) // 2, 0)
+        pos_y = self.work_y + max((self.work_h - window_h) // 2, 0)
         self.root.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
-        self.root.minsize(design_w, design_h)
+        self.root.minsize(
+            startup_layout["min_window_width"],
+            startup_layout["min_window_height"],
+        )
         self.root.resizable(True, True)
-
-        try:
-            self.root.tk.call("tk", "scaling", self.root.winfo_fpixels("1i") / 72.0)
-        except Exception:
-            pass
 
         self.preview_image = None
         self.preview_after_id = None
@@ -293,6 +341,10 @@ class BarcodeMergerApp:
         self.x_offset_var = tk.StringVar(value=self.saved_params["x_offset"])
         self.y_offset_var = tk.StringVar(value=self.saved_params["y_offset"])
         self.skip_keyword_var = tk.StringVar(value=self.saved_params["skip_keyword"])
+        self.reverse_save_var = tk.BooleanVar(
+            value=self.saved_params.get("reverse_save", "0").lower()
+            in {"1", "true", "yes", "on"}
+        )
 
         self.preview_zoom_var = tk.StringVar(value="适应整页")
         self.preview_barcode_var = tk.StringVar()
@@ -308,6 +360,63 @@ class BarcodeMergerApp:
         self.log(f"默认输出文件：{self.output_pdf_var.get()}")
         self.log(f"已加载设置：{app_config_file()}")
         self.log(f"窗口大小：{self.root.winfo_width()} x {self.root.winfo_height()}")
+
+    def calculate_startup_layout(self, work_w: int, work_h: int) -> Dict[str, int]:
+        if work_w >= 3200 or work_h >= 1800:
+            resolution_factor = 1.25
+        elif work_w >= 2400 or work_h >= 1300:
+            resolution_factor = 1.12
+        else:
+            resolution_factor = 1.0
+
+        layout_factor = max(resolution_factor, min(self.dpi_scale, 2.0))
+        screen_margin = 48 if resolution_factor > 1.0 else 32
+        max_window_width = max(work_w - screen_margin, 1)
+        max_window_height = max(work_h - screen_margin, 1)
+
+        min_window_width = min(
+            max(int(MIN_WINDOW_W * min(layout_factor, 1.15)), MIN_WINDOW_W),
+            max_window_width,
+        )
+        min_window_height = min(
+            max(int(MIN_WINDOW_H * min(layout_factor, 1.10)), MIN_WINDOW_H),
+            max_window_height,
+        )
+
+        preferred_window_width = int(DESIGN_WINDOW_W * layout_factor)
+        preferred_window_height = int(DESIGN_WINDOW_H * layout_factor)
+        window_width = clamp_int(
+            preferred_window_width, min_window_width, max_window_width
+        )
+        window_height = clamp_int(
+            preferred_window_height, min_window_height, max_window_height
+        )
+
+        min_left_width = max(PANEL_WIDTH, int(340 * min(layout_factor, 1.6)))
+        min_right_width = max(560, int(560 * min(layout_factor, 1.25)))
+        if min_left_width + min_right_width > window_width:
+            min_right_width = max(480, window_width - min_left_width)
+        if min_left_width + min_right_width > window_width:
+            min_left_width = max(320, window_width - min_right_width)
+
+        preferred_left_width = int(PANEL_WIDTH * layout_factor)
+        pane_sash = clamp_int(
+            preferred_left_width,
+            min_left_width,
+            max(min_left_width, window_width - min_right_width),
+        )
+
+        return {
+            "window_width": window_width,
+            "window_height": window_height,
+            "min_window_width": min_window_width,
+            "min_window_height": min_window_height,
+            "max_window_width": max_window_width,
+            "max_window_height": max_window_height,
+            "min_left_width": min_left_width,
+            "min_right_width": min_right_width,
+            "pane_sash": pane_sash,
+        }
 
     def setup_style(self) -> None:
         # 从配置中获取颜色
@@ -437,6 +546,7 @@ class BarcodeMergerApp:
             self.x_offset_var,
             self.y_offset_var,
             self.skip_keyword_var,
+            self.reverse_save_var,
         ):
             var.trace_add("write", lambda *args: self.schedule_save_settings())
 
@@ -470,6 +580,11 @@ class BarcodeMergerApp:
             window_width = None
             window_height = None
 
+        try:
+            main_pane_sash = max(int(self.main_pane.sash_coord(0)[0]), 1)
+        except Exception:
+            main_pane_sash = None
+
         data = {
             "barcode_width_ratio": self.barcode_width_ratio_var.get(),
             "bottom_margin": self.bottom_margin_var.get(),
@@ -477,8 +592,10 @@ class BarcodeMergerApp:
             "x_offset": self.x_offset_var.get(),
             "y_offset": self.y_offset_var.get(),
             "skip_keyword": self.skip_keyword_var.get(),
+            "reverse_save": "1" if self.reverse_save_var.get() else "0",
             "window_width": window_width,
             "window_height": window_height,
+            "main_pane_sash": main_pane_sash,
         }
 
         try:
@@ -495,18 +612,47 @@ class BarcodeMergerApp:
             fill="both", expand=True, padx=UI_PADDING["outer"], pady=UI_PADDING["outer"]
         )
 
-        left_outer = ttk.Frame(main, style="Panel.TFrame")
-        left_outer.pack(side="left", fill="y", padx=(0, UI_PADDING["inner"]))
-        left_outer.configure(width=PANEL_WIDTH)
+        self.main_pane = tk.PanedWindow(
+            main,
+            orient="horizontal",
+            bg=COLORS["bg"],
+            bd=0,
+            sashwidth=8,
+            sashrelief="flat",
+            showhandle=False,
+        )
+        self.main_pane.pack(fill="both", expand=True)
+        self.main_pane.bind("<ButtonRelease-1>", lambda event: self.save_settings())
+
+        left_outer = ttk.Frame(self.main_pane, style="Panel.TFrame")
+        left_outer.configure(width=self.default_pane_sash)
         left_outer.pack_propagate(False)
 
-        right = ttk.Frame(main, style="TFrame")
-        right.pack(side="left", fill="both", expand=True)
+        right = ttk.Frame(self.main_pane, style="TFrame")
+        self.main_pane.add(
+            left_outer, minsize=self.min_left_width, width=self.default_pane_sash
+        )
+        self.main_pane.add(right, minsize=self.min_right_width)
 
         left = self.create_scrollable_panel(left_outer)
         self.build_control_panel(left)
         self.build_preview_panel(right)
         self.build_log_panel(right)
+        self.root.after_idle(self.restore_main_pane_sash)
+
+    def restore_main_pane_sash(self) -> None:
+        try:
+            sash_pos = int(
+                self.saved_params.get("main_pane_sash") or self.default_pane_sash
+            )
+            max_pos = max(
+                self.main_pane.winfo_width() - self.min_right_width,
+                self.min_left_width,
+            )
+            sash_pos = clamp_int(sash_pos, self.min_left_width, max_pos)
+            self.main_pane.sash_place(0, sash_pos, 0)
+        except Exception:
+            pass
 
     def create_scrollable_panel(self, parent: ttk.Frame) -> ttk.Frame:
         canvas = tk.Canvas(
@@ -618,6 +764,26 @@ class BarcodeMergerApp:
         entry.bind("<KeyRelease>", lambda event: self.schedule_preview())
         entry.bind("<Return>", lambda event: self.update_preview())
         entry.bind("<FocusOut>", lambda event: self.update_preview())
+
+        self.section(parent, "输出设置")
+        reverse_check = tk.Checkbutton(
+            parent,
+            text="逆序保存",
+            variable=self.reverse_save_var,
+            command=self.save_settings,
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            activebackground=COLORS["panel"],
+            activeforeground=COLORS["text"],
+            selectcolor=COLORS["input_bg"],
+            font=FONTS["default"],
+            anchor="w",
+        )
+        reverse_check.pack(
+            fill="x",
+            padx=UI_PADDING["outer"],
+            pady=(0, UI_PADDING["small"]),
+        )
 
         hint = tk.Label(
             parent,
@@ -1352,6 +1518,7 @@ class BarcodeMergerApp:
             self.log(f"  [{index}] 条码 PDF：{job['barcode_pdf']}")
             self.log(f"      输出 PDF：{job['output_pdf']}")
         self.log(f"跳过关键词：{self.skip_keyword_var.get()}")
+        self.log(f"逆序保存：{'是' if self.reverse_save_var.get() else '否'}")
         self.log("-" * 60)
         self.log("当前条码设置：")
         self.log(f"  条码宽度比例：{params['barcode_width_ratio']}")
@@ -1373,6 +1540,7 @@ class BarcodeMergerApp:
                 on_complete=self._on_merge_complete,
                 on_error=self._on_merge_error,
                 skip_keyword=self.skip_keyword_var.get(),
+                reverse_save=self.reverse_save_var.get(),
             )
         else:
             self.merge_thread = BatchMergePDFWorker(
@@ -1383,6 +1551,7 @@ class BarcodeMergerApp:
                 on_complete=self._on_merge_complete,
                 on_error=self._on_merge_error,
                 skip_keyword=self.skip_keyword_var.get(),
+                reverse_save=self.reverse_save_var.get(),
             )
         self.merge_thread.start()
 
