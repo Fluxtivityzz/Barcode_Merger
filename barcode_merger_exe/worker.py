@@ -209,3 +209,71 @@ class MergePDFWorker(threading.Thread):
     def is_running(self) -> bool:
         """检查线程是否运行中"""
         return self.is_alive()
+
+
+class BatchMergePDFWorker(threading.Thread):
+    """批量PDF合并工作线程"""
+
+    def __init__(self, base_pdf: str, barcode_jobs: list, params: Dict[str, float],
+                 on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
+                 on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None) -> None:
+        super().__init__(daemon=False)
+
+        self.base_pdf = base_pdf
+        self.barcode_jobs = barcode_jobs
+        self.params = params
+        self.on_progress = on_progress or (lambda *args: None)
+        self.on_complete = on_complete or (lambda *args: None)
+        self.on_error = on_error or (lambda *args: None)
+        self.skip_keyword = SKIP_KEYWORD if skip_keyword is None else skip_keyword
+        self._stop_event = threading.Event()
+        self.result = None
+        self.error = None
+
+    def run(self) -> None:
+        try:
+            results = []
+            total_jobs = len(self.barcode_jobs)
+            for job_index, job in enumerate(self.barcode_jobs, start=1):
+                if self._stop_event.is_set():
+                    raise InterruptedError("操作已被用户中断")
+
+                barcode_pdf = job["barcode_pdf"]
+                output_pdf = job["output_pdf"]
+                self.on_progress(
+                    job_index - 1,
+                    total_jobs,
+                    f"开始处理第 {job_index} / {total_jobs} 个条码 PDF：{Path(barcode_pdf).name}",
+                )
+
+                worker = MergePDFWorker(
+                    self.base_pdf,
+                    barcode_pdf,
+                    output_pdf,
+                    self.params,
+                    on_progress=lambda current, total, message, idx=job_index, count=total_jobs:
+                        self.on_progress(current, total, f"[{idx}/{count}] {message}"),
+                    skip_keyword=self.skip_keyword,
+                )
+                worker._stop_event = self._stop_event
+                result = worker._merge_pdf()
+                result["barcode_pdf"] = barcode_pdf
+                results.append(result)
+
+            self.result = {
+                "success": True,
+                "total_jobs": total_jobs,
+                "results": results,
+            }
+            self.on_complete(self.result)
+        except Exception as e:
+            self.error = str(e)
+            self.on_error(self.error)
+
+    def stop(self) -> None:
+        """请求停止线程"""
+        self._stop_event.set()
+
+    def is_running(self) -> bool:
+        """检查线程是否运行中"""
+        return self.is_alive()

@@ -36,7 +36,7 @@ from config import (
 )
 from validators import ParamValidator, ValidationError
 from cache import PreviewCache
-from worker import MergePDFWorker
+from worker import BatchMergePDFWorker, MergePDFWorker
 
 
 PREFERRED_UI_FONTS = (
@@ -161,9 +161,32 @@ def desktop_default_file() -> str:
     return str(Path.cwd() / "合并结果.pdf")
 
 
-def merged_output_for_barcode(barcode_pdf: str) -> str:
+def merged_output_for_barcode(barcode_pdf: str, output_dir: Optional[str] = None) -> str:
     barcode_path = Path(barcode_pdf)
-    return str(barcode_path.with_name(f"{barcode_path.stem}_合并.pdf"))
+    folder = Path(output_dir) if output_dir else barcode_path.parent
+    return str(folder / f"{barcode_path.stem}_合并.pdf")
+
+
+def barcode_selection_text(barcode_paths: List[str]) -> str:
+    if not barcode_paths:
+        return ""
+    if len(barcode_paths) == 1:
+        return barcode_paths[0]
+    return f"已选择 {len(barcode_paths)} 个条码 PDF"
+
+
+def output_selection_text(barcode_paths: List[str], output_dir: Optional[str] = None) -> str:
+    if not barcode_paths:
+        return desktop_default_file()
+    if len(barcode_paths) == 1:
+        return merged_output_for_barcode(barcode_paths[0], output_dir)
+    if output_dir:
+        return f"输出目录：{output_dir}"
+    return f"输出目录：{Path(barcode_paths[0]).parent}"
+
+
+def preview_choice_text(index: int, barcode_pdf: str) -> str:
+    return f"{index + 1}. {Path(barcode_pdf).name}"
 
 
 def app_config_file() -> Path:
@@ -257,6 +280,8 @@ class BarcodeMergerApp:
         self.base_pdf_var = tk.StringVar()
         self.barcode_pdf_var = tk.StringVar()
         self.output_pdf_var = tk.StringVar(value=desktop_default_file())
+        self.barcode_pdf_paths = []
+        self.output_dir = None
 
         self.barcode_width_ratio_var = tk.StringVar(
             value=self.saved_params["barcode_width_ratio"]
@@ -270,6 +295,7 @@ class BarcodeMergerApp:
         self.skip_keyword_var = tk.StringVar(value=self.saved_params["skip_keyword"])
 
         self.preview_zoom_var = tk.StringVar(value="适应整页")
+        self.preview_barcode_var = tk.StringVar()
         self.preview_page_var = tk.IntVar(value=1)
         self.preview_page_text_var = tk.StringVar(value="第 0 页 / 共 0 页")
         self.preview_detail_var = tk.StringVar(value="请选择文件后预览")
@@ -560,7 +586,7 @@ class BarcodeMergerApp:
             parent, "条码 PDF", self.barcode_pdf_var, self.choose_barcode_pdf
         )
         self.file_row(
-            parent, "输出 PDF", self.output_pdf_var, self.choose_output_pdf
+            parent, "输出位置", self.output_pdf_var, self.choose_output_pdf
         )
 
         self.section(parent, "条码设置")
@@ -644,6 +670,21 @@ class BarcodeMergerApp:
             fill="x",
             padx=UI_PADDING["outer"],
             pady=(UI_PADDING["tiny"], UI_PADDING["small"]),
+        )
+
+        ttk.Label(controls, text="预览文件", style="Muted.TLabel").pack(
+            side="left", padx=(0, UI_PADDING["small"])
+        )
+        self.preview_barcode_box = ttk.Combobox(
+            controls,
+            textvariable=self.preview_barcode_var,
+            values=[],
+            state="readonly",
+            width=22,
+        )
+        self.preview_barcode_box.pack(side="left", padx=(0, UI_PADDING["inner"]))
+        self.preview_barcode_box.bind(
+            "<<ComboboxSelected>>", lambda event: self.preview_barcode_changed()
         )
 
         ttk.Label(controls, text="缩放", style="Muted.TLabel").pack(
@@ -863,6 +904,11 @@ class BarcodeMergerApp:
     def clear_selected_files(self) -> None:
         self.base_pdf_var.set("")
         self.barcode_pdf_var.set("")
+        self.barcode_pdf_paths = []
+        self.output_dir = None
+        self.preview_barcode_var.set("")
+        if hasattr(self, "preview_barcode_box"):
+            self.preview_barcode_box.configure(values=[])
         self.output_pdf_var.set(desktop_default_file())
         self.preview_page_var.set(1)
         self.valid_barcode_indices = []
@@ -882,18 +928,41 @@ class BarcodeMergerApp:
             self.update_preview()
 
     def choose_barcode_pdf(self) -> None:
-        path = filedialog.askopenfilename(
-            title="选择条码 PDF", filetypes=[("PDF 文件", "*.pdf")]
+        paths = filedialog.askopenfilenames(
+            title="选择一个或多个条码 PDF", filetypes=[("PDF 文件", "*.pdf")]
         )
-        if path:
-            self.barcode_pdf_var.set(path)
-            self.output_pdf_var.set(merged_output_for_barcode(path))
+        if paths:
+            self.barcode_pdf_paths = list(paths)
+            self.output_dir = str(Path(self.barcode_pdf_paths[0]).parent)
+            self.barcode_pdf_var.set(barcode_selection_text(self.barcode_pdf_paths))
+            self.output_pdf_var.set(
+                output_selection_text(self.barcode_pdf_paths, self.output_dir)
+            )
+            self.update_preview_barcode_options()
             self.preview_page_var.set(1)
-            self.log(f"已选择条码 PDF：{path}")
-            self.log(f"输出 PDF 已自动设置为：{self.output_pdf_var.get()}")
+            self.log(f"已选择 {len(self.barcode_pdf_paths)} 个条码 PDF")
+            for path in self.barcode_pdf_paths:
+                self.log(f"  条码 PDF：{path}")
+                self.log(f"  输出 PDF：{merged_output_for_barcode(path, self.output_dir)}")
             self.update_preview()
 
     def choose_output_pdf(self) -> None:
+        if len(self.barcode_pdf_paths) > 1:
+            initial_dir = self.output_dir or str(Path(self.barcode_pdf_paths[0]).parent)
+            folder = filedialog.askdirectory(
+                title="选择批量输出目录",
+                initialdir=initial_dir,
+            )
+            if folder:
+                self.output_dir = folder
+                self.output_pdf_var.set(
+                    output_selection_text(self.barcode_pdf_paths, self.output_dir)
+                )
+                self.log(f"批量输出目录已设置为：{self.output_dir}")
+                for path in self.barcode_pdf_paths:
+                    self.log(f"  输出 PDF：{merged_output_for_barcode(path, self.output_dir)}")
+            return
+
         current = self.output_pdf_var.get().strip()
         initial_dir = str(Path(current).parent) if current else str(Path.home())
         initial_file = Path(current).name if current else "合并结果.pdf"
@@ -907,6 +976,27 @@ class BarcodeMergerApp:
         if path:
             self.output_pdf_var.set(path)
             self.log(f"已选择输出 PDF：{path}")
+
+    def update_preview_barcode_options(self) -> None:
+        if not hasattr(self, "preview_barcode_box"):
+            return
+
+        values = [
+            preview_choice_text(index, path)
+            for index, path in enumerate(self.barcode_pdf_paths)
+        ]
+        self.preview_barcode_box.configure(values=values)
+        if values:
+            current = self.preview_barcode_var.get()
+            if current not in values:
+                self.preview_barcode_var.set(values[0])
+        else:
+            self.preview_barcode_var.set("")
+
+    def preview_barcode_changed(self) -> None:
+        self.preview_page_var.set(1)
+        self.valid_barcode_indices = []
+        self.update_preview()
 
     def log(self, message: str) -> None:
         print(message)
@@ -1017,9 +1107,18 @@ class BarcodeMergerApp:
             return barcode_index
         return preview_page_number - 1
 
+    def get_preview_barcode_pdf(self) -> str:
+        if self.barcode_pdf_paths:
+            selected = self.preview_barcode_var.get()
+            for index, path in enumerate(self.barcode_pdf_paths):
+                if selected == preview_choice_text(index, path):
+                    return path
+            return self.barcode_pdf_paths[0]
+        return self.barcode_pdf_var.get().strip()
+
     def validate_files_for_preview(self) -> Tuple[Optional[str], Optional[str]]:
         base_pdf = self.base_pdf_var.get().strip()
-        barcode_pdf = self.barcode_pdf_var.get().strip()
+        barcode_pdf = self.get_preview_barcode_pdf()
         if not base_pdf or not barcode_pdf:
             self.draw_preview_placeholder("请选择底板 PDF 和条码 PDF")
             return None, None
@@ -1206,12 +1305,37 @@ class BarcodeMergerApp:
         # 验证文件和参数
         try:
             base_pdf = self.base_pdf_var.get().strip()
-            barcode_pdf = self.barcode_pdf_var.get().strip()
-            output_pdf = self.output_pdf_var.get().strip()
+            barcode_pdfs = self.barcode_pdf_paths or [self.barcode_pdf_var.get().strip()]
+            barcode_pdfs = [path for path in barcode_pdfs if path]
+            if not barcode_pdfs:
+                raise ValidationError("请选择条码 PDF")
 
-            base_pdf, barcode_pdf, output_pdf = ParamValidator.validate_all_files(
-                base_pdf, barcode_pdf, output_pdf
-            )
+            base_pdf = ParamValidator.validate_file_path(base_pdf)
+            batch_output_dir = self.output_dir
+            if len(barcode_pdfs) > 1 and not batch_output_dir:
+                batch_output_dir = str(Path(barcode_pdfs[0]).parent)
+
+            barcode_jobs = []
+            for barcode_pdf in barcode_pdfs:
+                barcode_pdf = ParamValidator.validate_file_path(barcode_pdf)
+                output_pdf = ParamValidator.validate_output_path(
+                    merged_output_for_barcode(barcode_pdf, batch_output_dir)
+                    if len(barcode_pdfs) > 1
+                    else self.output_pdf_var.get().strip()
+                )
+
+                output_path = Path(output_pdf).resolve()
+                if output_path == Path(base_pdf).resolve():
+                    raise ValidationError("输出 PDF 不能与底板 PDF 相同")
+                if output_path == Path(barcode_pdf).resolve():
+                    raise ValidationError("输出 PDF 不能与条码 PDF 相同")
+
+                barcode_jobs.append(
+                    {
+                        "barcode_pdf": barcode_pdf,
+                        "output_pdf": output_pdf,
+                    }
+                )
             params = self.get_params()
         except (ValidationError, ValueError) as exc:
             messagebox.showerror(APP_TITLE, str(exc))
@@ -1223,8 +1347,10 @@ class BarcodeMergerApp:
         self.log("开始合并 PDF（后台处理中）")
         self.log("=" * 60)
         self.log(f"底板 PDF：{base_pdf}")
-        self.log(f"条码 PDF：{barcode_pdf}")
-        self.log(f"输出 PDF：{output_pdf}")
+        self.log(f"条码 PDF 数量：{len(barcode_jobs)}")
+        for index, job in enumerate(barcode_jobs, start=1):
+            self.log(f"  [{index}] 条码 PDF：{job['barcode_pdf']}")
+            self.log(f"      输出 PDF：{job['output_pdf']}")
         self.log(f"跳过关键词：{self.skip_keyword_var.get()}")
         self.log("-" * 60)
         self.log("当前条码设置：")
@@ -1236,16 +1362,28 @@ class BarcodeMergerApp:
         self.log("-" * 60)
 
         # 创建并启动后台工作线程
-        self.merge_thread = MergePDFWorker(
-            base_pdf,
-            barcode_pdf,
-            output_pdf,
-            params,
-            on_progress=self._on_merge_progress,
-            on_complete=self._on_merge_complete,
-            on_error=self._on_merge_error,
-            skip_keyword=self.skip_keyword_var.get(),
-        )
+        if len(barcode_jobs) == 1:
+            job = barcode_jobs[0]
+            self.merge_thread = MergePDFWorker(
+                base_pdf,
+                job["barcode_pdf"],
+                job["output_pdf"],
+                params,
+                on_progress=self._on_merge_progress,
+                on_complete=self._on_merge_complete,
+                on_error=self._on_merge_error,
+                skip_keyword=self.skip_keyword_var.get(),
+            )
+        else:
+            self.merge_thread = BatchMergePDFWorker(
+                base_pdf,
+                barcode_jobs,
+                params,
+                on_progress=self._on_merge_progress,
+                on_complete=self._on_merge_complete,
+                on_error=self._on_merge_error,
+                skip_keyword=self.skip_keyword_var.get(),
+            )
         self.merge_thread.start()
 
     def _on_merge_progress(self, current: int, total: int, message: str) -> None:
@@ -1266,6 +1404,30 @@ class BarcodeMergerApp:
             self.log("=" * 60)
             self.log("PDF 合并完成")
             self.log("=" * 60)
+            if "results" in result:
+                total_merged = sum(item["merged_count"] for item in result["results"])
+                total_skipped = sum(item["skipped_count"] for item in result["results"])
+                self.log(f"已处理条码 PDF：{result['total_jobs']} 个")
+                self.log(f"已合并总页数：{total_merged}")
+                self.log(f"已跳过总页数：{total_skipped}")
+                for index, item in enumerate(result["results"], start=1):
+                    self.log(f"[{index}] 条码 PDF：{item['barcode_pdf']}")
+                    self.log(f"    输出文件：{item['output_path']}")
+                    self.log(
+                        f"    合并 {item['merged_count']} 页，跳过 {item['skipped_count']} 页"
+                    )
+                self.log("=" * 60)
+
+                messagebox.showinfo(
+                    APP_TITLE,
+                    f"批量 PDF 合并成功。\n\n"
+                    f"已处理：{result['total_jobs']} 个条码 PDF\n"
+                    f"已合并：{total_merged} 页\n"
+                    f"已跳过：{total_skipped} 页",
+                )
+                self.update_preview()
+                return
+
             self.log(f"条码 PDF 总页数：{result['total_pages']}")
             self.log(f"已合并页数：{result['merged_count']}")
             self.log(f"已跳过页数：{result['skipped_count']}")
