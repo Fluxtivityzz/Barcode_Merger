@@ -1,7 +1,7 @@
 """
 后台工作线程 - 处理耗时操作
 """
-from typing import Dict, Callable, Optional, Any
+from typing import Dict, Callable, Optional, Any, List, Sequence
 import threading
 import fitz
 import re
@@ -15,6 +15,166 @@ def normalize_text(text: Optional[str]) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
+def parse_feature_keywords(text: Optional[str]) -> List[str]:
+    """解析特性筛选关键词，支持分号和换行分隔。"""
+    parts = re.split(r"[;；\r\n]+", text or "")
+    return [normalize_text(part) for part in parts if normalize_text(part)]
+
+
+def page_matches_keywords(page: fitz.Page, keywords: Sequence[str]) -> bool:
+    """判断页面文本是否包含任一特性关键词。"""
+    if not keywords:
+        return True
+    page_text = normalize_text(page.get_text("text"))
+    return any(keyword in page_text for keyword in keywords)
+
+
+def save_pdf_atomic(doc: fitz.Document, output_pdf: str) -> None:
+    """原子保存 PDF，避免失败时留下半写入文件。"""
+    out_path = Path(output_pdf)
+    temp_path = out_path.with_name(
+        f".{out_path.stem}.{uuid.uuid4().hex}.tmp{out_path.suffix}"
+    )
+    if temp_path.exists():
+        temp_path.unlink()
+
+    try:
+        doc.save(
+            str(temp_path),
+            garbage=PDF_COMPRESSION["garbage"],
+            deflate=PDF_COMPRESSION["deflate"],
+        )
+        temp_path.replace(out_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+
+def save_filtered_document(
+    source: fitz.Document,
+    output_pdf: str,
+    keywords: Sequence[str],
+    on_progress: Optional[Callable] = None,
+    stop_event: Optional[threading.Event] = None,
+    inverse: bool = False,
+) -> Dict[str, Any]:
+    """保存按特性关键词筛选后的新 PDF。"""
+    progress = on_progress or (lambda *args: None)
+    out = fitz.open()
+    kept_pages = []
+    total_pages = len(source)
+
+    try:
+        for index in range(total_pages):
+            if stop_event and stop_event.is_set():
+                raise InterruptedError("操作已被用户中断")
+
+            page_number = index + 1
+            has_keyword = page_matches_keywords(source[index], keywords)
+            should_keep = not has_keyword if inverse else has_keyword
+            if should_keep:
+                out.insert_pdf(source, from_page=index, to_page=index)
+                kept_pages.append(page_number)
+
+            progress(
+                page_number,
+                total_pages,
+                f"正在解析特性信息：第 {page_number} / {total_pages} 页",
+            )
+
+        if not kept_pages:
+            keyword_text = "；".join(keywords)
+            mode_text = "不包含" if inverse else "包含"
+            raise ValueError(f"没有页面{mode_text}特性信息：{keyword_text}")
+
+        progress(total_pages, total_pages, "正在保存筛选后的 PDF...")
+        save_pdf_atomic(out, output_pdf)
+        return {
+            "matched_count": len(kept_pages),
+            "removed_count": total_pages - len(kept_pages),
+            "matched_pages": kept_pages,
+            "feature_keywords": list(keywords),
+            "filter_inverse": inverse,
+        }
+    finally:
+        try:
+            out.close()
+        except Exception:
+            pass
+
+
+class FilterPDFWorker(threading.Thread):
+    """PDF特性信息筛选工作线程"""
+
+    def __init__(
+        self,
+        input_pdf: str,
+        output_pdf: str,
+        feature_keywords: str,
+        filter_inverse: bool = False,
+        on_progress: Optional[Callable] = None,
+        on_complete: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+    ) -> None:
+        super().__init__(daemon=False)
+        self.input_pdf = input_pdf
+        self.output_pdf = output_pdf
+        self.keywords = parse_feature_keywords(feature_keywords)
+        self.filter_inverse = filter_inverse
+        self.on_progress = on_progress or (lambda *args: None)
+        self.on_complete = on_complete or (lambda *args: None)
+        self.on_error = on_error or (lambda *args: None)
+        self._stop_event = threading.Event()
+        self.result = None
+        self.error = None
+
+    def run(self) -> None:
+        source = None
+        try:
+            if not self.keywords:
+                raise ValueError("请输入要保留的特性信息")
+
+            source = fitz.open(self.input_pdf)
+            if len(source) == 0:
+                raise ValueError("PDF 没有页面")
+
+            self.on_progress(0, len(source), f"开始解析特性信息，共 {len(source)} 页")
+            filter_result = save_filtered_document(
+                source,
+                self.output_pdf,
+                self.keywords,
+                on_progress=self.on_progress,
+                stop_event=self._stop_event,
+                inverse=self.filter_inverse,
+            )
+            self.result = {
+                "success": True,
+                "input_path": self.input_pdf,
+                "output_path": self.output_pdf,
+                "total_pages": len(source),
+                **filter_result,
+            }
+            self.on_complete(self.result)
+        except Exception as e:
+            self.error = str(e)
+            self.on_error(self.error)
+        finally:
+            if source:
+                try:
+                    source.close()
+                except Exception:
+                    pass
+
+    def stop(self) -> None:
+        """请求停止线程"""
+        self._stop_event.set()
+
+    def is_running(self) -> bool:
+        """检查线程是否运行中"""
+        return self.is_alive()
+
+
 class MergePDFWorker(threading.Thread):
     """PDF合并工作线程
     
@@ -25,7 +185,8 @@ class MergePDFWorker(threading.Thread):
     def __init__(self, base_pdf: str, barcode_pdf: str, output_pdf: str, params: Dict[str, float],
                  on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
                  on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
-                 reverse_save: bool = False) -> None:
+                 reverse_save: bool = False, feature_filter_keywords: Optional[str] = None,
+                 feature_filter_inverse: bool = False) -> None:
         """初始化工作线程
         
         Args:
@@ -38,6 +199,8 @@ class MergePDFWorker(threading.Thread):
             on_error: 错误回调 (error_message)
             skip_keyword: 跳过关键词 (如果为None则使用默认配置)
             reverse_save: 是否按相反页序保存输出
+            feature_filter_keywords: 合并后只保留包含这些特性信息的页面
+            feature_filter_inverse: 是否反选，保留不包含特性信息的页面
         """
         super().__init__(daemon=False)
         
@@ -50,6 +213,8 @@ class MergePDFWorker(threading.Thread):
         self.on_error = on_error or (lambda *args: None)
         self.skip_keyword = SKIP_KEYWORD if skip_keyword is None else skip_keyword
         self.reverse_save = reverse_save
+        self.feature_filter_keywords = parse_feature_keywords(feature_filter_keywords)
+        self.feature_filter_inverse = feature_filter_inverse
         
         self._stop_event = threading.Event()
         self.result = None
@@ -154,25 +319,26 @@ class MergePDFWorker(threading.Thread):
                 )
 
             # 保存输出
-            self.on_progress(total_barcode_pages, total_barcode_pages, "正在保存 PDF...")
-            out_path = Path(self.output_pdf)
-            temp_path = out_path.with_name(
-                f".{out_path.stem}.{uuid.uuid4().hex}.tmp{out_path.suffix}"
-            )
-            if temp_path.exists():
-                temp_path.unlink()
+            filter_result = None
+            if self.feature_filter_keywords:
+                self.on_progress(
+                    total_barcode_pages,
+                    total_barcode_pages,
+                    "正在按特性信息筛选合并结果...",
+                )
+                filter_result = save_filtered_document(
+                    out,
+                    self.output_pdf,
+                    self.feature_filter_keywords,
+                    on_progress=self.on_progress,
+                    stop_event=self._stop_event,
+                    inverse=self.feature_filter_inverse,
+                )
+            else:
+                self.on_progress(total_barcode_pages, total_barcode_pages, "正在保存 PDF...")
+                save_pdf_atomic(out, self.output_pdf)
 
-            try:
-                out.save(str(temp_path),
-                        garbage=PDF_COMPRESSION['garbage'], 
-                        deflate=PDF_COMPRESSION['deflate'])
-                temp_path.replace(out_path)
-            except Exception:
-                if temp_path.exists():
-                    temp_path.unlink()
-                raise
-
-            return {
+            result = {
                 'success': True,
                 'total_pages': total_barcode_pages,
                 'merged_count': merged_count,
@@ -181,6 +347,9 @@ class MergePDFWorker(threading.Thread):
                 'reverse_save': self.reverse_save,
                 'output_path': self.output_pdf,
             }
+            if filter_result:
+                result["feature_filter"] = filter_result
+            return result
 
         finally:
             for doc in (out, base, barcodes):
@@ -233,7 +402,8 @@ class BatchMergePDFWorker(threading.Thread):
     def __init__(self, base_pdf: str, barcode_jobs: list, params: Dict[str, float],
                  on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
                  on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
-                 reverse_save: bool = False) -> None:
+                 reverse_save: bool = False, feature_filter_keywords: Optional[str] = None,
+                 feature_filter_inverse: bool = False) -> None:
         super().__init__(daemon=False)
 
         self.base_pdf = base_pdf
@@ -244,6 +414,8 @@ class BatchMergePDFWorker(threading.Thread):
         self.on_error = on_error or (lambda *args: None)
         self.skip_keyword = SKIP_KEYWORD if skip_keyword is None else skip_keyword
         self.reverse_save = reverse_save
+        self.feature_filter_keywords = feature_filter_keywords
+        self.feature_filter_inverse = feature_filter_inverse
         self._stop_event = threading.Event()
         self.result = None
         self.error = None
@@ -273,6 +445,8 @@ class BatchMergePDFWorker(threading.Thread):
                         self.on_progress(current, total, f"[{idx}/{count}] {message}"),
                     skip_keyword=self.skip_keyword,
                     reverse_save=self.reverse_save,
+                    feature_filter_keywords=self.feature_filter_keywords,
+                    feature_filter_inverse=self.feature_filter_inverse,
                 )
                 worker._stop_event = self._stop_event
                 result = worker._merge_pdf()

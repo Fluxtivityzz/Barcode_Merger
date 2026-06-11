@@ -28,15 +28,13 @@ from config import (
     DESIGN_WINDOW_H,
     MIN_WINDOW_W,
     MIN_WINDOW_H,
-    DEFAULT_WINDOW_W,
-    DEFAULT_WINDOW_H,
     PANEL_WIDTH,
     PARAM_HINTS,
     LOG_HEIGHT,
 )
 from validators import ParamValidator, ValidationError
 from cache import PreviewCache
-from worker import BatchMergePDFWorker, MergePDFWorker
+from worker import BatchMergePDFWorker, FilterPDFWorker, MergePDFWorker
 
 
 PREFERRED_UI_FONTS = (
@@ -165,6 +163,12 @@ def merged_output_for_barcode(barcode_pdf: str, output_dir: Optional[str] = None
     barcode_path = Path(barcode_pdf)
     folder = Path(output_dir) if output_dir else barcode_path.parent
     return str(folder / f"{barcode_path.stem}_合并.pdf")
+
+
+def filtered_output_for_pdf(input_pdf: str, output_dir: Optional[str] = None) -> str:
+    input_path = Path(input_pdf)
+    folder = Path(output_dir) if output_dir else input_path.parent
+    return str(folder / f"{input_path.stem}_筛选.pdf")
 
 
 def barcode_selection_text(barcode_paths: List[str]) -> str:
@@ -328,6 +332,8 @@ class BarcodeMergerApp:
         self.base_pdf_var = tk.StringVar()
         self.barcode_pdf_var = tk.StringVar()
         self.output_pdf_var = tk.StringVar(value=desktop_default_file())
+        self.feature_source_pdf_var = tk.StringVar()
+        self.feature_output_pdf_var = tk.StringVar()
         self.barcode_pdf_paths = []
         self.output_dir = None
 
@@ -345,6 +351,22 @@ class BarcodeMergerApp:
             value=self.saved_params.get("reverse_save", "0").lower()
             in {"1", "true", "yes", "on"}
         )
+        self.feature_filter_keyword_var = tk.StringVar(
+            value=self.saved_params.get("feature_filter_keyword", "")
+        )
+        self.feature_filter_after_merge_var = tk.BooleanVar(
+            value=self.saved_params.get("feature_filter_after_merge", "0").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.feature_filter_inverse_var = tk.BooleanVar(
+            value=self.saved_params.get("feature_filter_inverse", "0").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if (
+            self.feature_filter_inverse_var.get()
+            and not self.feature_filter_after_merge_var.get()
+        ):
+            self.feature_filter_after_merge_var.set(True)
 
         self.preview_zoom_var = tk.StringVar(value="适应整页")
         self.preview_barcode_var = tk.StringVar()
@@ -699,6 +721,9 @@ class BarcodeMergerApp:
             self.y_offset_var,
             self.skip_keyword_var,
             self.reverse_save_var,
+            self.feature_filter_keyword_var,
+            self.feature_filter_after_merge_var,
+            self.feature_filter_inverse_var,
         ):
             var.trace_add("write", lambda *args: self.schedule_save_settings())
 
@@ -745,6 +770,13 @@ class BarcodeMergerApp:
             "y_offset": self.y_offset_var.get(),
             "skip_keyword": self.skip_keyword_var.get(),
             "reverse_save": "1" if self.reverse_save_var.get() else "0",
+            "feature_filter_keyword": self.feature_filter_keyword_var.get(),
+            "feature_filter_after_merge": (
+                "1" if self.feature_filter_after_merge_var.get() else "0"
+            ),
+            "feature_filter_inverse": (
+                "1" if self.feature_filter_inverse_var.get() else "0"
+            ),
             "window_width": window_width,
             "window_height": window_height,
             "main_pane_sash": main_pane_sash,
@@ -920,6 +952,42 @@ class BarcodeMergerApp:
         entry.bind("<Return>", lambda event: self.update_preview())
         entry.bind("<FocusOut>", lambda event: self.update_preview())
 
+        self.section(parent, "特性筛选")
+        feature_frame = ttk.Frame(parent, style="Panel.TFrame")
+        feature_frame.pack(
+            fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"])
+        )
+        ttk.Label(feature_frame, text="特性信息", style="Muted.TLabel").pack(
+            anchor="w", pady=(0, UI_PADDING["tiny"])
+        )
+        feature_entry = ttk.Entry(
+            feature_frame, textvariable=self.feature_filter_keyword_var
+        )
+        feature_entry.pack(fill="x")
+        self.feature_filter_after_merge_control(parent)
+        self.feature_filter_inverse_control(parent)
+        self.file_row(
+            parent,
+            "筛选源 PDF",
+            self.feature_source_pdf_var,
+            self.choose_feature_source_pdf,
+        )
+        self.file_row(
+            parent,
+            "筛选输出",
+            self.feature_output_pdf_var,
+            self.choose_feature_output_pdf,
+        )
+        feature_btn_frame = ttk.Frame(parent, style="Panel.TFrame")
+        feature_btn_frame.pack(
+            fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"])
+        )
+        ttk.Button(
+            feature_btn_frame,
+            text="筛选任意 PDF",
+            command=self.filter_feature_pdf,
+        ).pack(fill="x")
+
         self.section(parent, "输出设置")
         self.reverse_save_control(parent)
 
@@ -983,6 +1051,150 @@ class BarcodeMergerApp:
             widget.bind("<Button-1>", lambda event: self.toggle_reverse_save())
 
         self.draw_reverse_save_box()
+
+    def feature_filter_after_merge_control(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
+
+        self.feature_filter_after_merge_box = tk.Canvas(
+            row,
+            width=24,
+            height=24,
+            bg=COLORS["panel"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.feature_filter_after_merge_box.pack(
+            side="left", padx=(0, UI_PADDING["small"])
+        )
+
+        label = tk.Label(
+            row,
+            text="合并后启用特性筛选",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=FONTS["default"],
+            cursor="hand2",
+            justify="left",
+            wraplength=330,
+        )
+        label.pack(side="left", anchor="w")
+
+        for widget in (row, self.feature_filter_after_merge_box, label):
+            widget.bind(
+                "<Button-1>", lambda event: self.toggle_feature_filter_after_merge()
+            )
+
+        self.draw_feature_filter_after_merge_box()
+
+    def feature_filter_inverse_control(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
+
+        self.feature_filter_inverse_box = tk.Canvas(
+            row,
+            width=24,
+            height=24,
+            bg=COLORS["panel"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.feature_filter_inverse_box.pack(
+            side="left", padx=(0, UI_PADDING["small"])
+        )
+
+        label = tk.Label(
+            row,
+            text="反选：输出不包含特性信息的页面",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=FONTS["default"],
+            cursor="hand2",
+            justify="left",
+            wraplength=330,
+        )
+        label.pack(side="left", anchor="w")
+
+        for widget in (row, self.feature_filter_inverse_box, label):
+            widget.bind("<Button-1>", lambda event: self.toggle_feature_filter_inverse())
+
+        self.draw_feature_filter_inverse_box()
+
+    def toggle_feature_filter_inverse(self) -> None:
+        next_value = not self.feature_filter_inverse_var.get()
+        self.feature_filter_inverse_var.set(next_value)
+        if next_value and not self.feature_filter_after_merge_var.get():
+            self.feature_filter_after_merge_var.set(True)
+            self.draw_feature_filter_after_merge_box()
+        self.draw_feature_filter_inverse_box()
+        self.save_settings()
+
+    def draw_feature_filter_inverse_box(self) -> None:
+        if not hasattr(self, "feature_filter_inverse_box"):
+            return
+
+        c = COLORS
+        checked = self.feature_filter_inverse_var.get()
+        self.feature_filter_inverse_box.delete("all")
+        fill = c["input_bg"]
+        outline = c["accent"] if checked else c["border"]
+
+        self.feature_filter_inverse_box.create_rectangle(
+            2,
+            2,
+            22,
+            22,
+            fill=fill,
+            outline=outline,
+            width=2,
+        )
+        if checked:
+            self.feature_filter_inverse_box.create_rectangle(
+                7,
+                7,
+                17,
+                17,
+                fill=c["accent"],
+                outline=c["accent"],
+            )
+
+    def toggle_feature_filter_after_merge(self) -> None:
+        self.feature_filter_after_merge_var.set(
+            not self.feature_filter_after_merge_var.get()
+        )
+        self.draw_feature_filter_after_merge_box()
+        self.save_settings()
+
+    def draw_feature_filter_after_merge_box(self) -> None:
+        if not hasattr(self, "feature_filter_after_merge_box"):
+            return
+
+        c = COLORS
+        checked = self.feature_filter_after_merge_var.get()
+        self.feature_filter_after_merge_box.delete("all")
+        fill = c["input_bg"]
+        outline = c["accent"] if checked else c["border"]
+
+        self.feature_filter_after_merge_box.create_rectangle(
+            2,
+            2,
+            22,
+            22,
+            fill=fill,
+            outline=outline,
+            width=2,
+        )
+        if checked:
+            self.feature_filter_after_merge_box.create_rectangle(
+                7,
+                7,
+                17,
+                17,
+                fill=c["accent"],
+                outline=c["accent"],
+            )
 
     def toggle_reverse_save(self) -> None:
         self.reverse_save_var.set(not self.reverse_save_var.get())
@@ -1344,6 +1556,34 @@ class BarcodeMergerApp:
         if path:
             self.output_pdf_var.set(path)
             self.log(f"已选择输出 PDF：{path}")
+
+    def choose_feature_source_pdf(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择要筛选的 PDF", filetypes=[("PDF 文件", "*.pdf")]
+        )
+        if path:
+            self.feature_source_pdf_var.set(path)
+            self.feature_output_pdf_var.set(filtered_output_for_pdf(path))
+            self.log(f"已选择筛选源 PDF：{path}")
+            self.log(f"筛选输出 PDF：{self.feature_output_pdf_var.get()}")
+
+    def choose_feature_output_pdf(self) -> None:
+        current = self.feature_output_pdf_var.get().strip()
+        source = self.feature_source_pdf_var.get().strip()
+        if not current and source:
+            current = filtered_output_for_pdf(source)
+        initial_dir = str(Path(current).parent) if current else str(Path.home())
+        initial_file = Path(current).name if current else "筛选结果.pdf"
+        path = filedialog.asksaveasfilename(
+            title="选择筛选输出 PDF",
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            defaultextension=".pdf",
+            filetypes=[("PDF 文件", "*.pdf")],
+        )
+        if path:
+            self.feature_output_pdf_var.set(path)
+            self.log(f"已选择筛选输出 PDF：{path}")
 
     def update_preview_barcode_options(self) -> None:
         if not hasattr(self, "preview_barcode_box"):
@@ -1719,6 +1959,15 @@ class BarcodeMergerApp:
             self.log(f"验证失败：{exc}")
             return
 
+        feature_filter_keywords = None
+        feature_filter_inverse = self.feature_filter_inverse_var.get()
+        if self.feature_filter_after_merge_var.get():
+            feature_filter_keywords = self.feature_filter_keyword_var.get().strip()
+            if not feature_filter_keywords:
+                messagebox.showerror(APP_TITLE, "请输入用于筛选的特性信息")
+                self.log("验证失败：已启用合并后特性筛选，但未输入特性信息")
+                return
+
         # 输出开始日志
         self.log("=" * 60)
         self.log("开始合并 PDF（后台处理中）")
@@ -1730,6 +1979,15 @@ class BarcodeMergerApp:
             self.log(f"      输出 PDF：{job['output_pdf']}")
         self.log(f"跳过关键词：{self.skip_keyword_var.get()}")
         self.log(f"逆序保存：{'是' if self.reverse_save_var.get() else '否'}")
+        self.log(
+            f"合并后特性筛选：{'是' if feature_filter_keywords else '否'}"
+        )
+        if feature_filter_keywords:
+            self.log(
+                "特性筛选模式："
+                f"{'反选，输出不包含特性信息的页面' if feature_filter_inverse else '输出包含特性信息的页面'}"
+            )
+            self.log(f"特性信息：{feature_filter_keywords}")
         self.log("-" * 60)
         self.log("当前条码设置：")
         self.log(f"  条码宽度比例：{params['barcode_width_ratio']}")
@@ -1752,6 +2010,8 @@ class BarcodeMergerApp:
                 on_error=self._on_merge_error,
                 skip_keyword=self.skip_keyword_var.get(),
                 reverse_save=self.reverse_save_var.get(),
+                feature_filter_keywords=feature_filter_keywords,
+                feature_filter_inverse=feature_filter_inverse,
             )
         else:
             self.merge_thread = BatchMergePDFWorker(
@@ -1763,7 +2023,57 @@ class BarcodeMergerApp:
                 on_error=self._on_merge_error,
                 skip_keyword=self.skip_keyword_var.get(),
                 reverse_save=self.reverse_save_var.get(),
+                feature_filter_keywords=feature_filter_keywords,
+                feature_filter_inverse=feature_filter_inverse,
             )
+        self.merge_thread.start()
+
+    def filter_feature_pdf(self) -> None:
+        if self.merge_thread and self.merge_thread.is_running():
+            messagebox.showwarning(APP_TITLE, "正在处理 PDF，请稍候...")
+            return
+
+        try:
+            input_pdf = ParamValidator.validate_file_path(
+                self.feature_source_pdf_var.get().strip()
+            )
+            output_pdf = self.feature_output_pdf_var.get().strip()
+            if not output_pdf:
+                output_pdf = filtered_output_for_pdf(input_pdf)
+                self.feature_output_pdf_var.set(output_pdf)
+            output_pdf = ParamValidator.validate_output_path(output_pdf)
+            feature_keywords = self.feature_filter_keyword_var.get().strip()
+            if not feature_keywords:
+                raise ValidationError("请输入用于筛选的特性信息")
+
+            if Path(output_pdf).resolve() == Path(input_pdf).resolve():
+                raise ValidationError("筛选输出 PDF 不能与源 PDF 相同")
+        except ValidationError as exc:
+            messagebox.showerror(APP_TITLE, str(exc))
+            self.log(f"验证失败：{exc}")
+            return
+
+        self.log("=" * 60)
+        self.log("开始筛选 PDF 特性信息（后台处理中）")
+        self.log("=" * 60)
+        self.log(f"源 PDF：{input_pdf}")
+        self.log(f"输出 PDF：{output_pdf}")
+        self.log(
+            "特性筛选模式："
+            f"{'反选，输出不包含特性信息的页面' if self.feature_filter_inverse_var.get() else '输出包含特性信息的页面'}"
+        )
+        self.log(f"特性信息：{feature_keywords}")
+        self.log("-" * 60)
+
+        self.merge_thread = FilterPDFWorker(
+            input_pdf,
+            output_pdf,
+            feature_keywords,
+            filter_inverse=self.feature_filter_inverse_var.get(),
+            on_progress=self._on_filter_progress,
+            on_complete=self._on_filter_complete,
+            on_error=self._on_filter_error,
+        )
         self.merge_thread.start()
 
     def _on_merge_progress(self, current: int, total: int, message: str) -> None:
@@ -1774,6 +2084,67 @@ class BarcodeMergerApp:
             self.root.after(0, lambda: self.log(message))
         except tk.TclError:
             pass
+
+    def _on_filter_progress(self, current: int, total: int, message: str) -> None:
+        """特性筛选进度回调"""
+        if self.is_closing:
+            return
+        try:
+            self.root.after(0, lambda: self.log(message))
+        except tk.TclError:
+            pass
+
+    def _on_filter_complete(self, result: Dict[str, Any]) -> None:
+        """特性筛选完成回调"""
+
+        def on_complete_ui():
+            if self.is_closing:
+                return
+            self.log("=" * 60)
+            self.log("PDF 特性筛选完成")
+            self.log("=" * 60)
+            self.log(
+                "筛选模式："
+                f"{'反选，保留不包含特性信息的页面' if result.get('filter_inverse') else '保留包含特性信息的页面'}"
+            )
+            self.log(f"源 PDF：{result['input_path']}")
+            self.log(f"总页数：{result['total_pages']}")
+            self.log(f"保留页数：{result['matched_count']}")
+            self.log(f"移除页数：{result['removed_count']}")
+            self.log(f"保留的页码：{result['matched_pages']}")
+            self.log(f"输出文件：{result['output_path']}")
+            self.log("=" * 60)
+
+            messagebox.showinfo(
+                APP_TITLE,
+                f"PDF 特性筛选成功：\n{result['output_path']}\n\n"
+                f"模式：{'反选' if result.get('filter_inverse') else '包含'}\n"
+                f"保留：{result['matched_count']} 页\n"
+                f"移除：{result['removed_count']} 页",
+            )
+
+        if not self.is_closing:
+            try:
+                self.root.after(0, on_complete_ui)
+            except tk.TclError:
+                pass
+
+    def _on_filter_error(self, error_message: str) -> None:
+        """特性筛选错误回调"""
+
+        def on_error_ui():
+            if self.is_closing:
+                return
+            self.log("=" * 60)
+            self.log(f"特性筛选失败：{error_message}")
+            self.log("=" * 60)
+            messagebox.showerror(APP_TITLE, f"特性筛选失败：\n{error_message}")
+
+        if not self.is_closing:
+            try:
+                self.root.after(0, on_error_ui)
+            except tk.TclError:
+                pass
 
     def _on_merge_complete(self, result: Dict[str, Any]) -> None:
         """合并完成回调"""
@@ -1787,15 +2158,39 @@ class BarcodeMergerApp:
             if "results" in result:
                 total_merged = sum(item["merged_count"] for item in result["results"])
                 total_skipped = sum(item["skipped_count"] for item in result["results"])
+                feature_results = [
+                    item["feature_filter"]
+                    for item in result["results"]
+                    if item.get("feature_filter")
+                ]
                 self.log(f"已处理条码 PDF：{result['total_jobs']} 个")
                 self.log(f"已合并总页数：{total_merged}")
                 self.log(f"已跳过总页数：{total_skipped}")
+                if feature_results:
+                    total_feature_matched = sum(
+                        item["matched_count"] for item in feature_results
+                    )
+                    total_feature_removed = sum(
+                        item["removed_count"] for item in feature_results
+                    )
+                    self.log(f"特性筛选保留总页数：{total_feature_matched}")
+                    self.log(f"特性筛选移除总页数：{total_feature_removed}")
                 for index, item in enumerate(result["results"], start=1):
                     self.log(f"[{index}] 条码 PDF：{item['barcode_pdf']}")
                     self.log(f"    输出文件：{item['output_path']}")
                     self.log(
                         f"    合并 {item['merged_count']} 页，跳过 {item['skipped_count']} 页"
                     )
+                    feature_filter = item.get("feature_filter")
+                    if feature_filter:
+                        self.log(
+                            f"    特性筛选保留 {feature_filter['matched_count']} 页，"
+                            f"移除 {feature_filter['removed_count']} 页"
+                        )
+                        self.log(
+                            "    筛选模式："
+                            f"{'反选' if feature_filter.get('filter_inverse') else '包含'}"
+                        )
                 self.log("=" * 60)
 
                 messagebox.showinfo(
@@ -1803,7 +2198,12 @@ class BarcodeMergerApp:
                     f"批量 PDF 合并成功。\n\n"
                     f"已处理：{result['total_jobs']} 个条码 PDF\n"
                     f"已合并：{total_merged} 页\n"
-                    f"已跳过：{total_skipped} 页",
+                    f"已跳过：{total_skipped} 页"
+                    + (
+                        f"\n特性筛选保留：{total_feature_matched} 页"
+                        if feature_results
+                        else ""
+                    ),
                 )
                 self.update_preview()
                 return
@@ -1811,6 +2211,15 @@ class BarcodeMergerApp:
             self.log(f"条码 PDF 总页数：{result['total_pages']}")
             self.log(f"已合并页数：{result['merged_count']}")
             self.log(f"已跳过页数：{result['skipped_count']}")
+            feature_filter = result.get("feature_filter")
+            if feature_filter:
+                self.log(
+                    "特性筛选模式："
+                    f"{'反选，保留不包含特性信息的页面' if feature_filter.get('filter_inverse') else '保留包含特性信息的页面'}"
+                )
+                self.log(f"特性筛选保留页数：{feature_filter['matched_count']}")
+                self.log(f"特性筛选移除页数：{feature_filter['removed_count']}")
+                self.log(f"特性筛选保留页码：{feature_filter['matched_pages']}")
 
             if result["skipped_pages"]:
                 self.log(f"跳过的页码：{result['skipped_pages']}")
@@ -1824,7 +2233,12 @@ class BarcodeMergerApp:
                 APP_TITLE,
                 f"PDF 合并成功：\n{result['output_path']}\n\n"
                 f"已合并：{result['merged_count']} 页\n"
-                f"已跳过：{result['skipped_count']} 页",
+                f"已跳过：{result['skipped_count']} 页"
+                + (
+                    f"\n特性筛选保留：{feature_filter['matched_count']} 页"
+                    if feature_filter
+                    else ""
+                ),
             )
             self.update_preview()
 
@@ -1860,7 +2274,7 @@ def main():
 
     root = tk.Tk()
     apply_preferred_fonts(root)
-    app = BarcodeMergerApp(root)
+    _ = BarcodeMergerApp(root)
     try:
         root.mainloop()
     finally:

@@ -101,6 +101,9 @@ DEFAULT_PARAMS = {
     'y_offset': '0',
     'skip_keyword': SKIP_KEYWORD,
     'reverse_save': '0',
+    'feature_filter_keyword': '',
+    'feature_filter_after_merge': '0',
+    'feature_filter_inverse': '0',
 }
 
 # ============ 配置文件 ============
