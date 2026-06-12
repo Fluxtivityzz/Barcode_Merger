@@ -34,7 +34,13 @@ from config import (
 )
 from validators import ParamValidator, ValidationError
 from cache import PreviewCache
-from worker import BatchMergePDFWorker, FilterPDFWorker, MergePDFWorker
+from worker import (
+    BatchFilterPDFWorker,
+    BatchMergePDFWorker,
+    FilterPDFWorker,
+    MergePDFWorker,
+    parse_feature_keywords,
+)
 
 
 PREFERRED_UI_FONTS = (
@@ -169,6 +175,25 @@ def filtered_output_for_pdf(input_pdf: str, output_dir: Optional[str] = None) ->
     input_path = Path(input_pdf)
     folder = Path(output_dir) if output_dir else input_path.parent
     return str(folder / f"{input_path.stem}_筛选.pdf")
+
+
+def pdf_filter_selection_text(pdf_paths: List[str]) -> str:
+    if not pdf_paths:
+        return ""
+    if len(pdf_paths) == 1:
+        return pdf_paths[0]
+    return f"已选择 {len(pdf_paths)} 个 PDF"
+
+
+def pdf_filter_output_text(
+    pdf_paths: List[str], output_dir: Optional[str] = None
+) -> str:
+    if not pdf_paths:
+        return ""
+    if len(pdf_paths) == 1:
+        return filtered_output_for_pdf(pdf_paths[0], output_dir)
+    folder = output_dir or str(Path(pdf_paths[0]).parent)
+    return f"输出目录：{folder}"
 
 
 def barcode_selection_text(barcode_paths: List[str]) -> str:
@@ -326,6 +351,8 @@ class BarcodeMergerApp:
         self.preview_image = None
         self.preview_after_id = None
         self.valid_barcode_indices = []
+        self.preview_jobs = []
+        self.preview_text_cache = {}
         self.settings_save_after_id = None
         self.is_closing = False
 
@@ -336,6 +363,8 @@ class BarcodeMergerApp:
         self.feature_output_pdf_var = tk.StringVar()
         self.barcode_pdf_paths = []
         self.output_dir = None
+        self.feature_source_pdf_paths = []
+        self.feature_output_dir = None
 
         self.barcode_width_ratio_var = tk.StringVar(
             value=self.saved_params["barcode_width_ratio"]
@@ -362,6 +391,19 @@ class BarcodeMergerApp:
             value=self.saved_params.get("feature_filter_inverse", "0").lower()
             in {"1", "true", "yes", "on"}
         )
+        self.pdf_filter_keyword_var = tk.StringVar(
+            value=(
+                self.saved_params.get("pdf_filter_keyword")
+                or self.saved_params.get("feature_filter_keyword", "")
+            )
+        )
+        self.pdf_filter_inverse_var = tk.BooleanVar(
+            value=self.saved_params.get(
+                "pdf_filter_inverse",
+                self.saved_params.get("feature_filter_inverse", "0"),
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
         if (
             self.feature_filter_inverse_var.get()
             and not self.feature_filter_after_merge_var.get()
@@ -370,6 +412,7 @@ class BarcodeMergerApp:
 
         self.preview_zoom_var = tk.StringVar(value="适应整页")
         self.preview_barcode_var = tk.StringVar()
+        self.preview_filter_pdf_var = tk.StringVar()
         self.preview_page_var = tk.IntVar(value=1)
         self.preview_page_text_var = tk.StringVar(value="第 0 页 / 共 0 页")
         self.preview_detail_var = tk.StringVar(value="请选择文件后预览")
@@ -724,6 +767,8 @@ class BarcodeMergerApp:
             self.feature_filter_keyword_var,
             self.feature_filter_after_merge_var,
             self.feature_filter_inverse_var,
+            self.pdf_filter_keyword_var,
+            self.pdf_filter_inverse_var,
         ):
             var.trace_add("write", lambda *args: self.schedule_save_settings())
 
@@ -777,6 +822,8 @@ class BarcodeMergerApp:
             "feature_filter_inverse": (
                 "1" if self.feature_filter_inverse_var.get() else "0"
             ),
+            "pdf_filter_keyword": self.pdf_filter_keyword_var.get(),
+            "pdf_filter_inverse": "1" if self.pdf_filter_inverse_var.get() else "0",
             "window_width": window_width,
             "window_height": window_height,
             "main_pane_sash": main_pane_sash,
@@ -821,8 +868,7 @@ class BarcodeMergerApp:
         )
         self.main_pane.add(right, minsize=self.min_right_width)
 
-        left = self.create_scrollable_panel(left_outer)
-        self.build_control_panel(left)
+        self.build_control_tabs(left_outer)
         self.build_preview_panel(right)
         self.build_log_panel(right)
         self.root.after_idle(self.restore_main_pane_sash)
@@ -890,6 +936,71 @@ class BarcodeMergerApp:
         self.root.unbind_all("<MouseWheel>")
         self.root.unbind_all("<Button-4>")
         self.root.unbind_all("<Button-5>")
+
+    def build_control_tabs(self, parent: ttk.Frame) -> None:
+        self.active_control_tab = "merge"
+        self.control_tab_buttons = {}
+        self.control_tab_frames = {}
+
+        tab_bar = tk.Frame(parent, bg=COLORS["panel"], bd=0, highlightthickness=0)
+        tab_bar.pack(
+            fill="x",
+            padx=UI_PADDING["outer"],
+            pady=(UI_PADDING["small"], 0),
+        )
+        for tab_key, text in (("merge", "条码合并"), ("filter", "PDF 筛选")):
+            label = tk.Label(
+                tab_bar,
+                text=text,
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=FONTS["semibold"],
+                padx=14,
+                pady=8,
+                cursor="hand2",
+                bd=0,
+            )
+            label.pack(side="left", padx=(0, UI_PADDING["tiny"]))
+            label.bind(
+                "<Button-1>",
+                lambda event, key=tab_key: self.switch_control_tab(key),
+            )
+            self.control_tab_buttons[tab_key] = label
+
+        content = ttk.Frame(parent, style="Panel.TFrame")
+        content.pack(fill="both", expand=True)
+        merge_tab = ttk.Frame(content, style="Panel.TFrame")
+        filter_tab = ttk.Frame(content, style="Panel.TFrame")
+        self.control_tab_frames = {"merge": merge_tab, "filter": filter_tab}
+
+        merge_panel = self.create_scrollable_panel(merge_tab)
+        filter_panel = self.create_scrollable_panel(filter_tab)
+        self.build_control_panel(merge_panel)
+        self.build_pdf_filter_panel(filter_panel)
+        self.switch_control_tab("merge", refresh=False)
+
+    def switch_control_tab(self, tab_key: str, refresh: bool = True) -> None:
+        if tab_key not in self.control_tab_frames:
+            return
+        self.active_control_tab = tab_key
+        for key, frame in self.control_tab_frames.items():
+            frame.pack_forget()
+            button = self.control_tab_buttons[key]
+            active = key == tab_key
+            button.configure(
+                bg=COLORS["panel_2"] if active else COLORS["panel"],
+                fg=COLORS["accent"] if active else COLORS["muted"],
+            )
+        self.control_tab_frames[tab_key].pack(fill="both", expand=True)
+        self.update_preview_file_options()
+        if not refresh:
+            return
+        self.preview_page_var.set(1)
+        self.preview_jobs = []
+        self.schedule_preview()
+
+    def is_pdf_filter_tab_active(self) -> bool:
+        return getattr(self, "active_control_tab", "merge") == "filter"
 
     def build_control_panel(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="PDF 条码合并工具", style="Title.TLabel").pack(
@@ -964,29 +1075,11 @@ class BarcodeMergerApp:
             feature_frame, textvariable=self.feature_filter_keyword_var
         )
         feature_entry.pack(fill="x")
+        feature_entry.bind("<KeyRelease>", lambda event: self.schedule_preview())
+        feature_entry.bind("<Return>", lambda event: self.update_preview())
+        feature_entry.bind("<FocusOut>", lambda event: self.update_preview())
         self.feature_filter_after_merge_control(parent)
         self.feature_filter_inverse_control(parent)
-        self.file_row(
-            parent,
-            "筛选源 PDF",
-            self.feature_source_pdf_var,
-            self.choose_feature_source_pdf,
-        )
-        self.file_row(
-            parent,
-            "筛选输出",
-            self.feature_output_pdf_var,
-            self.choose_feature_output_pdf,
-        )
-        feature_btn_frame = ttk.Frame(parent, style="Panel.TFrame")
-        feature_btn_frame.pack(
-            fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"])
-        )
-        ttk.Button(
-            feature_btn_frame,
-            text="筛选任意 PDF",
-            command=self.filter_feature_pdf,
-        ).pack(fill="x")
 
         self.section(parent, "输出设置")
         self.reverse_save_control(parent)
@@ -1020,6 +1113,68 @@ class BarcodeMergerApp:
         )
         ttk.Button(
             btn_frame, text="合并 PDF", style="Accent.TButton", command=self.merge_pdf
+        ).pack(fill="x")
+
+    def build_pdf_filter_panel(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="PDF 特性筛选", style="Title.TLabel").pack(
+            anchor="w",
+            padx=UI_PADDING["outer"],
+            pady=(UI_PADDING["outer"], UI_PADDING["tiny"]),
+        )
+        tk.Label(
+            parent,
+            text="选择任意 PDF，按特性信息输出包含或不包含该信息的页面。",
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=FONTS["muted"],
+        ).pack(
+            anchor="w",
+            fill="x",
+            padx=UI_PADDING["outer"],
+            pady=(0, UI_PADDING["outer"]),
+        )
+
+        self.section(parent, "筛选设置")
+        frame = ttk.Frame(parent, style="Panel.TFrame")
+        frame.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
+        ttk.Label(frame, text="特性信息", style="Muted.TLabel").pack(
+            anchor="w", pady=(0, UI_PADDING["tiny"])
+        )
+        entry = ttk.Entry(frame, textvariable=self.pdf_filter_keyword_var)
+        entry.pack(fill="x")
+        entry.bind("<KeyRelease>", lambda event: self.schedule_preview())
+        entry.bind("<Return>", lambda event: self.update_preview())
+        entry.bind("<FocusOut>", lambda event: self.update_preview())
+        self.pdf_filter_inverse_control(parent)
+
+        self.section(parent, "文件")
+        self.file_row(
+            parent,
+            "筛选源 PDF",
+            self.feature_source_pdf_var,
+            self.choose_feature_source_pdf,
+        )
+        self.file_row(
+            parent,
+            "筛选输出",
+            self.feature_output_pdf_var,
+            self.choose_feature_output_pdf,
+        )
+
+        btn_frame = ttk.Frame(parent, style="Panel.TFrame")
+        btn_frame.pack(
+            fill="x",
+            padx=UI_PADDING["outer"],
+            pady=(UI_PADDING["small"], UI_PADDING["outer"]),
+        )
+        ttk.Button(
+            btn_frame,
+            text="筛选任意 PDF",
+            style="Accent.TButton",
+            command=self.filter_feature_pdf,
         ).pack(fill="x")
 
     def reverse_save_control(self, parent: ttk.Frame) -> None:
@@ -1130,6 +1285,7 @@ class BarcodeMergerApp:
             self.draw_feature_filter_after_merge_box()
         self.draw_feature_filter_inverse_box()
         self.save_settings()
+        self.schedule_preview()
 
     def draw_feature_filter_inverse_box(self) -> None:
         if not hasattr(self, "feature_filter_inverse_box"):
@@ -1160,12 +1316,80 @@ class BarcodeMergerApp:
                 outline=c["accent"],
             )
 
+    def pdf_filter_inverse_control(self, parent: ttk.Frame) -> None:
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x", padx=UI_PADDING["outer"], pady=(0, UI_PADDING["small"]))
+
+        self.pdf_filter_inverse_box = tk.Canvas(
+            row,
+            width=24,
+            height=24,
+            bg=COLORS["panel"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.pdf_filter_inverse_box.pack(side="left", padx=(0, UI_PADDING["small"]))
+
+        label = tk.Label(
+            row,
+            text="反选：输出不包含特性信息的页面",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=FONTS["default"],
+            cursor="hand2",
+            justify="left",
+            wraplength=330,
+        )
+        label.pack(side="left", anchor="w")
+
+        for widget in (row, self.pdf_filter_inverse_box, label):
+            widget.bind("<Button-1>", lambda event: self.toggle_pdf_filter_inverse())
+
+        self.draw_pdf_filter_inverse_box()
+
+    def toggle_pdf_filter_inverse(self) -> None:
+        self.pdf_filter_inverse_var.set(not self.pdf_filter_inverse_var.get())
+        self.draw_pdf_filter_inverse_box()
+        self.save_settings()
+        self.schedule_preview()
+
+    def draw_pdf_filter_inverse_box(self) -> None:
+        if not hasattr(self, "pdf_filter_inverse_box"):
+            return
+
+        c = COLORS
+        checked = self.pdf_filter_inverse_var.get()
+        self.pdf_filter_inverse_box.delete("all")
+        fill = c["input_bg"]
+        outline = c["accent"] if checked else c["border"]
+
+        self.pdf_filter_inverse_box.create_rectangle(
+            2,
+            2,
+            22,
+            22,
+            fill=fill,
+            outline=outline,
+            width=2,
+        )
+        if checked:
+            self.pdf_filter_inverse_box.create_rectangle(
+                7,
+                7,
+                17,
+                17,
+                fill=c["accent"],
+                outline=c["accent"],
+            )
+
     def toggle_feature_filter_after_merge(self) -> None:
         self.feature_filter_after_merge_var.set(
             not self.feature_filter_after_merge_var.get()
         )
         self.draw_feature_filter_after_merge_box()
         self.save_settings()
+        self.schedule_preview()
 
     def draw_feature_filter_after_merge_box(self) -> None:
         if not hasattr(self, "feature_filter_after_merge_box"):
@@ -1492,6 +1716,8 @@ class BarcodeMergerApp:
         self.output_pdf_var.set(desktop_default_file())
         self.preview_page_var.set(1)
         self.valid_barcode_indices = []
+        self.preview_jobs = []
+        self.clear_preview_text_cache()
         self.preview_image = None
         self.draw_preview_placeholder("请选择底板 PDF 和条码 PDF")
         self.log("已清空选择的文件")
@@ -1503,6 +1729,7 @@ class BarcodeMergerApp:
         )
         if path:
             self.base_pdf_var.set(path)
+            self.clear_preview_text_cache()
             self.preview_page_var.set(1)
             self.log(f"已选择底板 PDF：{path}")
             self.update_preview()
@@ -1512,6 +1739,7 @@ class BarcodeMergerApp:
             title="选择一个或多个条码 PDF", filetypes=[("PDF 文件", "*.pdf")]
         )
         if paths:
+            self.clear_preview_text_cache()
             self.barcode_pdf_paths = list(paths)
             self.output_dir = str(Path(self.barcode_pdf_paths[0]).parent)
             self.barcode_pdf_var.set(barcode_selection_text(self.barcode_pdf_paths))
@@ -1558,18 +1786,59 @@ class BarcodeMergerApp:
             self.log(f"已选择输出 PDF：{path}")
 
     def choose_feature_source_pdf(self) -> None:
-        path = filedialog.askopenfilename(
-            title="选择要筛选的 PDF", filetypes=[("PDF 文件", "*.pdf")]
+        paths = filedialog.askopenfilenames(
+            title="选择一个或多个要筛选的 PDF", filetypes=[("PDF 文件", "*.pdf")]
         )
-        if path:
-            self.feature_source_pdf_var.set(path)
-            self.feature_output_pdf_var.set(filtered_output_for_pdf(path))
-            self.log(f"已选择筛选源 PDF：{path}")
-            self.log(f"筛选输出 PDF：{self.feature_output_pdf_var.get()}")
+        if paths:
+            self.feature_source_pdf_paths = list(paths)
+            self.feature_output_dir = str(Path(self.feature_source_pdf_paths[0]).parent)
+            self.feature_source_pdf_var.set(
+                pdf_filter_selection_text(self.feature_source_pdf_paths)
+            )
+            self.feature_output_pdf_var.set(
+                pdf_filter_output_text(
+                    self.feature_source_pdf_paths, self.feature_output_dir
+                )
+            )
+            self.update_preview_file_options()
+            self.preview_page_var.set(1)
+            self.schedule_preview()
+            self.log(f"已选择 {len(self.feature_source_pdf_paths)} 个筛选源 PDF")
+            for path in self.feature_source_pdf_paths:
+                self.log(f"  源 PDF：{path}")
+                self.log(
+                    f"  输出 PDF：{filtered_output_for_pdf(path, self.feature_output_dir)}"
+                )
 
     def choose_feature_output_pdf(self) -> None:
+        if len(self.feature_source_pdf_paths) > 1:
+            initial_dir = self.feature_output_dir or str(
+                Path(self.feature_source_pdf_paths[0]).parent
+            )
+            folder = filedialog.askdirectory(
+                title="选择筛选输出目录",
+                initialdir=initial_dir,
+            )
+            if folder:
+                self.feature_output_dir = folder
+                self.feature_output_pdf_var.set(
+                    pdf_filter_output_text(
+                        self.feature_source_pdf_paths, self.feature_output_dir
+                    )
+                )
+                self.log(f"筛选输出目录已设置为：{self.feature_output_dir}")
+                for path in self.feature_source_pdf_paths:
+                    self.log(
+                        f"  输出 PDF：{filtered_output_for_pdf(path, self.feature_output_dir)}"
+                    )
+            return
+
         current = self.feature_output_pdf_var.get().strip()
-        source = self.feature_source_pdf_var.get().strip()
+        source = (
+            self.feature_source_pdf_paths[0]
+            if self.feature_source_pdf_paths
+            else self.feature_source_pdf_var.get().strip()
+        )
         if not current and source:
             current = filtered_output_for_pdf(source)
         initial_dir = str(Path(current).parent) if current else str(Path.home())
@@ -1585,8 +1854,24 @@ class BarcodeMergerApp:
             self.feature_output_pdf_var.set(path)
             self.log(f"已选择筛选输出 PDF：{path}")
 
-    def update_preview_barcode_options(self) -> None:
+    def update_preview_file_options(self) -> None:
         if not hasattr(self, "preview_barcode_box"):
+            return
+
+        if self.is_pdf_filter_tab_active():
+            values = [
+                preview_choice_text(index, path)
+                for index, path in enumerate(self.feature_source_pdf_paths)
+            ]
+            self.preview_barcode_box.configure(values=values)
+            if values:
+                current = self.preview_filter_pdf_var.get()
+                if current not in values:
+                    self.preview_filter_pdf_var.set(values[0])
+                self.preview_barcode_var.set(self.preview_filter_pdf_var.get())
+            else:
+                self.preview_filter_pdf_var.set("")
+                self.preview_barcode_var.set("")
             return
 
         values = [
@@ -1601,9 +1886,15 @@ class BarcodeMergerApp:
         else:
             self.preview_barcode_var.set("")
 
+    def update_preview_barcode_options(self) -> None:
+        self.update_preview_file_options()
+
     def preview_barcode_changed(self) -> None:
+        if self.is_pdf_filter_tab_active():
+            self.preview_filter_pdf_var.set(self.preview_barcode_var.get())
         self.preview_page_var.set(1)
         self.valid_barcode_indices = []
+        self.preview_jobs = []
         self.update_preview()
 
     def log(self, message: str) -> None:
@@ -1676,15 +1967,41 @@ class BarcodeMergerApp:
 
         return fitz.Rect(x0, y0, x1, y1), target_w, target_h
 
+    def pdf_cache_signature(self, path: str) -> Tuple[str, Optional[int], Optional[int]]:
+        try:
+            pdf_path = Path(path).resolve()
+            stat = pdf_path.stat()
+            return str(pdf_path), stat.st_mtime_ns, stat.st_size
+        except Exception:
+            return str(path), None, None
+
+    def cached_page_text(
+        self, doc: fitz.Document, path: str, page_index: int
+    ) -> str:
+        key = (self.pdf_cache_signature(path), page_index)
+        cached = self.preview_text_cache.get(key)
+        if cached is not None:
+            return cached
+
+        text = normalize_text(doc[page_index].get_text("text"))
+        self.preview_text_cache[key] = text
+        return text
+
+    def clear_preview_text_cache(self) -> None:
+        self.preview_text_cache.clear()
+
     def get_valid_barcode_indices(
-        self, barcodes: fitz.Document
+        self, barcodes: fitz.Document, barcode_pdf: str
     ) -> Tuple[List[int], List[int]]:
         skip_keyword_normalized = normalize_text(self.skip_keyword_var.get())
+        if not skip_keyword_normalized:
+            return list(range(len(barcodes))), []
+
         valid = []
         skipped = []
         for i in range(len(barcodes)):
-            text = barcodes[i].get_text("text")
-            if skip_keyword_normalized and skip_keyword_normalized in normalize_text(text):
+            text = self.cached_page_text(barcodes, barcode_pdf, i)
+            if skip_keyword_normalized and skip_keyword_normalized in text:
                 skipped.append(i + 1)
             else:
                 valid.append(i)
@@ -1724,6 +2041,15 @@ class BarcodeMergerApp:
             return self.barcode_pdf_paths[0]
         return self.barcode_pdf_var.get().strip()
 
+    def get_preview_filter_pdf(self) -> Tuple[str, int]:
+        if self.feature_source_pdf_paths:
+            selected = self.preview_filter_pdf_var.get() or self.preview_barcode_var.get()
+            for index, path in enumerate(self.feature_source_pdf_paths):
+                if selected == preview_choice_text(index, path):
+                    return path, index
+            return self.feature_source_pdf_paths[0], 0
+        return self.feature_source_pdf_var.get().strip(), 0
+
     def validate_files_for_preview(self) -> Tuple[Optional[str], Optional[str]]:
         base_pdf = self.base_pdf_var.get().strip()
         barcode_pdf = self.get_preview_barcode_pdf()
@@ -1737,6 +2063,66 @@ class BarcodeMergerApp:
             self.draw_preview_placeholder("找不到条码 PDF")
             return None, None
         return base_pdf, barcode_pdf
+
+    def build_preview_jobs(
+        self,
+        base: fitz.Document,
+        valid_barcode_indices: List[int],
+        total_barcode_count: int,
+    ) -> List[Tuple[int, int]]:
+        jobs = []
+        for valid_position, barcode_index in enumerate(valid_barcode_indices):
+            if len(base) == 1:
+                base_page_index = 0
+            elif len(base) == total_barcode_count:
+                base_page_index = barcode_index
+            else:
+                base_page_index = valid_position
+            jobs.append((barcode_index, base_page_index))
+        return jobs
+
+    def preview_job_matches_feature(
+        self,
+        base: fitz.Document,
+        base_pdf: str,
+        barcodes: fitz.Document,
+        barcode_pdf: str,
+        barcode_index: int,
+        base_page_index: int,
+        keywords: List[str],
+    ) -> bool:
+        barcode_text = self.cached_page_text(barcodes, barcode_pdf, barcode_index)
+        if any(keyword in barcode_text for keyword in keywords):
+            return True
+
+        base_text = self.cached_page_text(base, base_pdf, base_page_index)
+        return any(keyword in base_text for keyword in keywords)
+
+    def filter_preview_jobs_by_feature(
+        self,
+        base: fitz.Document,
+        base_pdf: str,
+        barcodes: fitz.Document,
+        barcode_pdf: str,
+        jobs: List[Tuple[int, int]],
+        keywords: List[str],
+    ) -> List[Tuple[int, int]]:
+        inverse = self.feature_filter_inverse_var.get()
+        filtered_jobs = []
+        for barcode_index, base_page_index in jobs:
+            has_feature = self.preview_job_matches_feature(
+                base,
+                base_pdf,
+                barcodes,
+                barcode_pdf,
+                barcode_index,
+                base_page_index,
+                keywords,
+            )
+            should_keep = not has_feature if inverse else has_feature
+            if should_keep:
+                filtered_jobs.append((barcode_index, base_page_index))
+        return filtered_jobs
 
     def set_preview_page_range(self, total: int) -> int:
         total = max(total, 0)
@@ -1760,7 +2146,7 @@ class BarcodeMergerApp:
             return 1
 
     def preview_scale_changed(self, value: str) -> None:
-        total = max(len(self.valid_barcode_indices), 1)
+        total = max(len(self.preview_jobs), 1)
         page = int(round(float(value)))
         page = min(max(page, 1), total)
         if page != self.safe_preview_page_number():
@@ -1768,7 +2154,7 @@ class BarcodeMergerApp:
             self.schedule_preview()
 
     def preview_page_changed(self) -> None:
-        total = max(len(self.valid_barcode_indices), 1)
+        total = max(len(self.preview_jobs), 1)
         page = self.safe_preview_page_number()
         page = min(max(page, 1), total)
         self.preview_page_var.set(page)
@@ -1782,7 +2168,7 @@ class BarcodeMergerApp:
         self.update_preview()
 
     def next_preview_page(self) -> None:
-        total = max(len(self.valid_barcode_indices), 1)
+        total = max(len(self.preview_jobs), 1)
         page = min(self.safe_preview_page_number() + 1, total)
         self.preview_page_var.set(page)
         self.preview_page_scale.set(page)
@@ -1809,6 +2195,104 @@ class BarcodeMergerApp:
 
     def update_preview(self) -> None:
         self.preview_after_id = None
+        if self.is_pdf_filter_tab_active():
+            self.update_pdf_filter_preview()
+        else:
+            self.update_merge_preview()
+
+    def render_preview_page(self, page: fitz.Page) -> float:
+        zoom = self.get_preview_zoom(page.rect)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        png_bytes = pix.tobytes("png")
+
+        self.preview_image = tk.PhotoImage(data=png_bytes)
+        self.preview_canvas.delete("all")
+        canvas_w = max(self.preview_canvas.winfo_width(), 1)
+        canvas_h = max(self.preview_canvas.winfo_height(), 1)
+        image_w = self.preview_image.width()
+        image_h = self.preview_image.height()
+        x = max((canvas_w - image_w) / 2, 0)
+        y = max((canvas_h - image_h) / 2, 0)
+        self.preview_canvas.create_image(x, y, anchor="nw", image=self.preview_image)
+        self.preview_canvas.configure(
+            scrollregion=(
+                0,
+                0,
+                max(image_w + x * 2, canvas_w),
+                max(image_h + y * 2, canvas_h),
+            )
+        )
+        return zoom
+
+    def update_pdf_filter_preview(self) -> None:
+        self.update_preview_file_options()
+        source_pdf, source_pdf_index = self.get_preview_filter_pdf()
+        if not source_pdf:
+            self.preview_jobs = []
+            self.draw_preview_placeholder("请选择筛选源 PDF")
+            return
+        if not Path(source_pdf).exists():
+            self.preview_jobs = []
+            self.draw_preview_placeholder("找不到筛选源 PDF")
+            return
+
+        try:
+            doc = self.preview_cache.load_or_open(source_pdf)
+            if len(doc) == 0:
+                self.preview_jobs = []
+                self.draw_preview_placeholder("筛选源 PDF 没有页面")
+                return
+
+            keywords = parse_feature_keywords(self.pdf_filter_keyword_var.get())
+            inverse = self.pdf_filter_inverse_var.get()
+            if keywords:
+                pages = []
+                for page_index in range(len(doc)):
+                    text = self.cached_page_text(doc, source_pdf, page_index)
+                    has_feature = any(keyword in text for keyword in keywords)
+                    if (not has_feature if inverse else has_feature):
+                        pages.append(page_index)
+            else:
+                pages = list(range(len(doc)))
+
+            if not pages:
+                mode_text = "不包含" if inverse else "包含"
+                self.preview_jobs = []
+                self.draw_preview_placeholder(
+                    f"没有页面{mode_text}特性信息：{'；'.join(keywords)}"
+                )
+                return
+
+            self.preview_jobs = pages
+            preview_page_number = self.set_preview_page_range(len(self.preview_jobs))
+            source_page_index = self.preview_jobs[preview_page_number - 1]
+            page = doc[source_page_index]
+            zoom = self.render_preview_page(page)
+
+            self.preview_page_text_var.set(
+                f"第 {preview_page_number} 页 / 共 {len(self.preview_jobs)} 页"
+            )
+            if keywords:
+                feature_mode = "反选" if inverse else "包含"
+                removed_count = len(doc) - len(self.preview_jobs)
+                feature_text = (
+                    f"特性筛选 {feature_mode}，"
+                    f"保留 {len(self.preview_jobs)} 页，移除 {removed_count} 页 | "
+                )
+            else:
+                feature_text = ""
+            self.preview_detail_var.set(
+                f"源页 {source_page_index + 1} / {len(doc)} | "
+                f"预览文件 {source_pdf_index + 1} / {max(len(self.feature_source_pdf_paths), 1)} | "
+                f"{feature_text}"
+                f"缩放 {zoom * 100:.0f}%"
+            )
+        except Exception as exc:
+            self.preview_jobs = []
+            self.draw_preview_placeholder(str(exc))
+            self.log(f"筛选预览失败：{exc}")
+
+    def update_merge_preview(self) -> None:
         base_pdf, barcode_pdf = self.validate_files_for_preview()
         if not base_pdf or not barcode_pdf:
             return
@@ -1829,7 +2313,7 @@ class BarcodeMergerApp:
                 return
 
             self.valid_barcode_indices, skipped_pages = self.get_valid_barcode_indices(
-                barcodes
+                barcodes, barcode_pdf
             )
             if not self.valid_barcode_indices:
                 self.draw_preview_placeholder("没有找到可合并的条码页面")
@@ -1841,13 +2325,50 @@ class BarcodeMergerApp:
                 self.draw_preview_placeholder(base_page_count_error)
                 return
 
-            preview_page_number = self.set_preview_page_range(
-                len(self.valid_barcode_indices)
+            all_preview_jobs = self.build_preview_jobs(
+                base, self.valid_barcode_indices, len(barcodes)
             )
-            barcode_index = self.valid_barcode_indices[preview_page_number - 1]
-            base_page_index = self.get_base_page_index(
-                base, barcode_index, preview_page_number, len(barcodes)
-            )
+            feature_filter_enabled = self.feature_filter_after_merge_var.get()
+            feature_removed_count = 0
+            feature_keywords = []
+            if feature_filter_enabled:
+                feature_keywords = parse_feature_keywords(
+                    self.feature_filter_keyword_var.get()
+                )
+                if not feature_keywords:
+                    self.valid_barcode_indices = []
+                    self.preview_jobs = []
+                    self.draw_preview_placeholder("请输入用于筛选的特性信息")
+                    return
+
+                self.preview_jobs = self.filter_preview_jobs_by_feature(
+                    base,
+                    base_pdf,
+                    barcodes,
+                    barcode_pdf,
+                    all_preview_jobs,
+                    feature_keywords,
+                )
+                feature_removed_count = len(all_preview_jobs) - len(self.preview_jobs)
+                if not self.preview_jobs:
+                    self.valid_barcode_indices = []
+                    mode_text = (
+                        "不包含"
+                        if self.feature_filter_inverse_var.get()
+                        else "包含"
+                    )
+                    self.draw_preview_placeholder(
+                        f"没有页面{mode_text}特性信息：{'；'.join(feature_keywords)}"
+                    )
+                    return
+            else:
+                self.preview_jobs = all_preview_jobs
+
+            self.valid_barcode_indices = [
+                barcode_index for barcode_index, _ in self.preview_jobs
+            ]
+            preview_page_number = self.set_preview_page_range(len(self.preview_jobs))
+            barcode_index, base_page_index = self.preview_jobs[preview_page_number - 1]
 
             temp = fitz.open()
             temp.insert_pdf(base, from_page=base_page_index, to_page=base_page_index)
@@ -1882,13 +2403,25 @@ class BarcodeMergerApp:
             )
 
             self.preview_page_text_var.set(
-                f"第 {preview_page_number} 页 / 共 {len(self.valid_barcode_indices)} 页"
+                f"第 {preview_page_number} 页 / 共 {len(self.preview_jobs)} 页"
             )
             skipped_count = len(skipped_pages)
+            feature_detail = ""
+            if feature_filter_enabled:
+                feature_mode = (
+                    "反选"
+                    if self.feature_filter_inverse_var.get()
+                    else "包含"
+                )
+                feature_detail = (
+                    f"特性筛选 {feature_mode}，"
+                    f"保留 {len(self.preview_jobs)} 页，移除 {feature_removed_count} 页 | "
+                )
             self.preview_detail_var.set(
                 f"条码源页 {barcode_index + 1} / {len(barcodes)} | "
                 f"底板页 {base_page_index + 1} / {len(base)} | "
                 f"已跳过 {skipped_count} 页 | "
+                f"{feature_detail}"
                 f"缩放 {zoom * 100:.0f}% | "
                 f"宽 {target_w:.2f}，高 {target_h:.2f} | "
                 f"左 {target_rect.x0:.2f}，上 {target_rect.y0:.2f}，右 {target_rect.x1:.2f}，下 {target_rect.y1:.2f}"
@@ -2034,20 +2567,42 @@ class BarcodeMergerApp:
             return
 
         try:
-            input_pdf = ParamValidator.validate_file_path(
+            input_pdfs = self.feature_source_pdf_paths or [
                 self.feature_source_pdf_var.get().strip()
-            )
-            output_pdf = self.feature_output_pdf_var.get().strip()
-            if not output_pdf:
-                output_pdf = filtered_output_for_pdf(input_pdf)
-                self.feature_output_pdf_var.set(output_pdf)
-            output_pdf = ParamValidator.validate_output_path(output_pdf)
-            feature_keywords = self.feature_filter_keyword_var.get().strip()
+            ]
+            input_pdfs = [path for path in input_pdfs if path]
+            if not input_pdfs:
+                raise ValidationError("请选择筛选源 PDF")
+
+            feature_keywords = self.pdf_filter_keyword_var.get().strip()
             if not feature_keywords:
                 raise ValidationError("请输入用于筛选的特性信息")
 
-            if Path(output_pdf).resolve() == Path(input_pdf).resolve():
-                raise ValidationError("筛选输出 PDF 不能与源 PDF 相同")
+            output_dir = self.feature_output_dir
+            if len(input_pdfs) > 1 and not output_dir:
+                output_dir = str(Path(input_pdfs[0]).parent)
+
+            filter_jobs = []
+            for input_pdf in input_pdfs:
+                input_pdf = ParamValidator.validate_file_path(input_pdf)
+                if len(input_pdfs) > 1:
+                    output_pdf = filtered_output_for_pdf(input_pdf, output_dir)
+                else:
+                    output_pdf = self.feature_output_pdf_var.get().strip()
+                    if not output_pdf:
+                        output_pdf = filtered_output_for_pdf(input_pdf)
+                        self.feature_output_pdf_var.set(output_pdf)
+                output_pdf = ParamValidator.validate_output_path(output_pdf)
+
+                if Path(output_pdf).resolve() == Path(input_pdf).resolve():
+                    raise ValidationError("筛选输出 PDF 不能与源 PDF 相同")
+
+                filter_jobs.append(
+                    {
+                        "input_pdf": input_pdf,
+                        "output_pdf": output_pdf,
+                    }
+                )
         except ValidationError as exc:
             messagebox.showerror(APP_TITLE, str(exc))
             self.log(f"验证失败：{exc}")
@@ -2056,24 +2611,37 @@ class BarcodeMergerApp:
         self.log("=" * 60)
         self.log("开始筛选 PDF 特性信息（后台处理中）")
         self.log("=" * 60)
-        self.log(f"源 PDF：{input_pdf}")
-        self.log(f"输出 PDF：{output_pdf}")
+        self.log(f"筛选源 PDF 数量：{len(filter_jobs)}")
+        for index, job in enumerate(filter_jobs, start=1):
+            self.log(f"  [{index}] 源 PDF：{job['input_pdf']}")
+            self.log(f"      输出 PDF：{job['output_pdf']}")
         self.log(
             "特性筛选模式："
-            f"{'反选，输出不包含特性信息的页面' if self.feature_filter_inverse_var.get() else '输出包含特性信息的页面'}"
+            f"{'反选，输出不包含特性信息的页面' if self.pdf_filter_inverse_var.get() else '输出包含特性信息的页面'}"
         )
         self.log(f"特性信息：{feature_keywords}")
         self.log("-" * 60)
 
-        self.merge_thread = FilterPDFWorker(
-            input_pdf,
-            output_pdf,
-            feature_keywords,
-            filter_inverse=self.feature_filter_inverse_var.get(),
-            on_progress=self._on_filter_progress,
-            on_complete=self._on_filter_complete,
-            on_error=self._on_filter_error,
-        )
+        if len(filter_jobs) == 1:
+            job = filter_jobs[0]
+            self.merge_thread = FilterPDFWorker(
+                job["input_pdf"],
+                job["output_pdf"],
+                feature_keywords,
+                filter_inverse=self.pdf_filter_inverse_var.get(),
+                on_progress=self._on_filter_progress,
+                on_complete=self._on_filter_complete,
+                on_error=self._on_filter_error,
+            )
+        else:
+            self.merge_thread = BatchFilterPDFWorker(
+                filter_jobs,
+                feature_keywords,
+                filter_inverse=self.pdf_filter_inverse_var.get(),
+                on_progress=self._on_filter_progress,
+                on_complete=self._on_filter_complete,
+                on_error=self._on_filter_error,
+            )
         self.merge_thread.start()
 
     def _on_merge_progress(self, current: int, total: int, message: str) -> None:
@@ -2103,6 +2671,35 @@ class BarcodeMergerApp:
             self.log("=" * 60)
             self.log("PDF 特性筛选完成")
             self.log("=" * 60)
+            if "results" in result:
+                total_pages = sum(item["total_pages"] for item in result["results"])
+                total_matched = sum(item["matched_count"] for item in result["results"])
+                total_removed = sum(item["removed_count"] for item in result["results"])
+                first_result = result["results"][0] if result["results"] else {}
+                self.log(
+                    "筛选模式："
+                    f"{'反选，保留不包含特性信息的页面' if first_result.get('filter_inverse') else '保留包含特性信息的页面'}"
+                )
+                self.log(f"已处理 PDF：{result['total_jobs']} 个")
+                self.log(f"总页数：{total_pages}")
+                self.log(f"保留总页数：{total_matched}")
+                self.log(f"移除总页数：{total_removed}")
+                for index, item in enumerate(result["results"], start=1):
+                    self.log(f"[{index}] 源 PDF：{item['input_path']}")
+                    self.log(f"    输出文件：{item['output_path']}")
+                    self.log(
+                        f"    保留 {item['matched_count']} 页，移除 {item['removed_count']} 页"
+                    )
+                self.log("=" * 60)
+                messagebox.showinfo(
+                    APP_TITLE,
+                    f"批量 PDF 特性筛选成功。\n\n"
+                    f"已处理：{result['total_jobs']} 个 PDF\n"
+                    f"保留：{total_matched} 页\n"
+                    f"移除：{total_removed} 页",
+                )
+                return
+
             self.log(
                 "筛选模式："
                 f"{'反选，保留不包含特性信息的页面' if result.get('filter_inverse') else '保留包含特性信息的页面'}"

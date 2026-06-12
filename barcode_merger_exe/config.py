@@ -104,6 +104,8 @@ DEFAULT_PARAMS = {
     'feature_filter_keyword': '',
     'feature_filter_after_merge': '0',
     'feature_filter_inverse': '0',
+    'pdf_filter_keyword': '',
+    'pdf_filter_inverse': '0',
 }
 
 # ============ 配置文件 ============

@@ -175,6 +175,80 @@ class FilterPDFWorker(threading.Thread):
         return self.is_alive()
 
 
+class BatchFilterPDFWorker(threading.Thread):
+    """批量PDF特性信息筛选工作线程"""
+
+    def __init__(
+        self,
+        filter_jobs: list,
+        feature_keywords: str,
+        filter_inverse: bool = False,
+        on_progress: Optional[Callable] = None,
+        on_complete: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+    ) -> None:
+        super().__init__(daemon=False)
+        self.filter_jobs = filter_jobs
+        self.feature_keywords = feature_keywords
+        self.filter_inverse = filter_inverse
+        self.on_progress = on_progress or (lambda *args: None)
+        self.on_complete = on_complete or (lambda *args: None)
+        self.on_error = on_error or (lambda *args: None)
+        self._stop_event = threading.Event()
+        self.result = None
+        self.error = None
+
+    def run(self) -> None:
+        try:
+            results = []
+            total_jobs = len(self.filter_jobs)
+            for job_index, job in enumerate(self.filter_jobs, start=1):
+                if self._stop_event.is_set():
+                    raise InterruptedError("操作已被用户中断")
+
+                input_pdf = job["input_pdf"]
+                output_pdf = job["output_pdf"]
+                self.on_progress(
+                    job_index - 1,
+                    total_jobs,
+                    f"开始筛选第 {job_index} / {total_jobs} 个 PDF：{Path(input_pdf).name}",
+                )
+
+                worker = FilterPDFWorker(
+                    input_pdf,
+                    output_pdf,
+                    self.feature_keywords,
+                    filter_inverse=self.filter_inverse,
+                    on_progress=lambda current, total, message, idx=job_index, count=total_jobs:
+                        self.on_progress(current, total, f"[{idx}/{count}] {message}"),
+                )
+                worker._stop_event = self._stop_event
+                worker.run()
+                if worker.error:
+                    raise ValueError(worker.error)
+                result = worker.result
+                result["input_pdf"] = input_pdf
+                results.append(result)
+
+            self.result = {
+                "success": True,
+                "total_jobs": total_jobs,
+                "results": results,
+            }
+            self.on_complete(self.result)
+        except Exception as e:
+            self.error = str(e)
+            self.on_error(self.error)
+
+    def stop(self) -> None:
+        """请求停止线程"""
+        self._stop_event.set()
+
+    def is_running(self) -> bool:
+        """检查线程是否运行中"""
+        return self.is_alive()
+
+
 class MergePDFWorker(threading.Thread):
     """PDF合并工作线程
     
