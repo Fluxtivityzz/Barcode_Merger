@@ -1,7 +1,7 @@
 """
 后台工作线程 - 处理耗时操作
 """
-from typing import Dict, Callable, Optional, Any, List, Sequence
+from typing import Dict, Callable, Optional, Any, List, Sequence, Tuple
 import threading
 import fitz
 import re
@@ -51,6 +51,276 @@ def save_pdf_atomic(doc: fitz.Document, output_pdf: str) -> None:
         raise
 
 
+def draw_page_number(
+    page: fitz.Page,
+    page_number: int,
+    total_pages: int,
+    position: str = "right",
+) -> None:
+    """在页面左下或右下添加小号清晰页码。"""
+    text = f"{page_number}/{total_pages}"
+    fontsize = 9
+    margin_x = 18
+    margin_y = 18
+    y = page.rect.y1 - margin_y
+    if position == "left":
+        x = page.rect.x0 + margin_x
+    else:
+        text_width = fitz.get_text_length(text, fontname="helv", fontsize=fontsize)
+        x = page.rect.x1 - margin_x - text_width
+    page.insert_text(
+        (x, y),
+        text,
+        fontsize=fontsize,
+        fontname="helv",
+        color=(0, 0, 0),
+    )
+
+
+def add_page_numbers(doc: fitz.Document, position: str = "right") -> None:
+    total_pages = len(doc)
+    for page_index in range(total_pages):
+        draw_page_number(doc[page_index], page_index + 1, total_pages, position)
+
+
+SORT_BARCODE_SKU_CLIP = (0.17, 0.815, 0.39, 0.855)
+SORT_PACKAGE_INFO_CLIP = (0.05, 0.645, 0.95, 0.72)
+
+
+def relative_rect(page: fitz.Page, ratios: Tuple[float, float, float, float]) -> fitz.Rect:
+    rect = page.rect
+    return fitz.Rect(
+        rect.x0 + rect.width * ratios[0],
+        rect.y0 + rect.height * ratios[1],
+        rect.x0 + rect.width * ratios[2],
+        rect.y0 + rect.height * ratios[3],
+    )
+
+
+def normalize_sort_key(text: Optional[str]) -> str:
+    return normalize_text(text).casefold()
+
+
+def extract_sku_token(text: str) -> Optional[str]:
+    normalized = normalize_text(text)
+    match = re.search(r"货号([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)", normalized)
+    if match:
+        return match.group(1)
+
+    match = re.search(r"([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)", normalized)
+    if match:
+        return match.group(1)
+    return None
+
+
+def extract_barcode_sort_key(page: fitz.Page) -> Tuple[Optional[str], str]:
+    text = page.get_text("text", clip=relative_rect(page, SORT_BARCODE_SKU_CLIP))
+    return extract_sku_token(text), text
+
+
+def extract_package_sort_info(page: fitz.Page) -> Tuple[Optional[str], int, str]:
+    text = page.get_text("text", clip=relative_rect(page, SORT_PACKAGE_INFO_CLIP))
+    normalized = normalize_text(text)
+    qty_match = re.search(r"(\d+)件", normalized)
+    sku_text = normalized[: qty_match.start()] if qty_match else normalized
+    sku = extract_sku_token(sku_text)
+    quantity = int(qty_match.group(1)) if qty_match else 1
+    return sku, max(quantity, 1), text
+
+
+def classify_sort_entry(entry: Dict[str, Any], keywords: Sequence[str]) -> int:
+    """按用户设置的归类词决定面单/条码块的排序类别。"""
+    if not keywords:
+        return 0
+
+    candidates = []
+    if entry.get("sku"):
+        candidates.append(entry["sku"])
+    candidates.extend(entry.get("barcode_skus") or [])
+
+    # 兜底兼容未识别出货号的页面；仍然只做开头匹配，不做包含匹配。
+    candidates.extend((entry.get("text") or "", entry.get("barcode_text") or ""))
+    normalized_candidates = [
+        normalize_sort_key(candidate) for candidate in candidates if normalize_sort_key(candidate)
+    ]
+    for index, keyword in enumerate(keywords):
+        key = normalize_sort_key(keyword)
+        if key and any(candidate.startswith(key) for candidate in normalized_candidates):
+            return index
+    return len(keywords)
+
+
+def build_sort_plan(
+    barcode_doc: fitz.Document,
+    package_doc: fitz.Document,
+    sort_keywords: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    keywords = [keyword for keyword in (sort_keywords or []) if normalize_sort_key(keyword)]
+    barcode_info = []
+    for page_index in range(len(barcode_doc)):
+        sku, text = extract_barcode_sort_key(barcode_doc[page_index])
+        barcode_info.append({"page_index": page_index, "sku": sku, "text": text})
+
+    package_entries = []
+    unmatched_package_pages = []
+    missing_matches = []
+    barcode_cursor = 0
+
+    for page_index in range(len(package_doc)):
+        sku, quantity, text = extract_package_sort_info(package_doc[page_index])
+        key = normalize_sort_key(sku)
+        start_index = barcode_cursor
+        barcode_cursor += quantity
+        barcode_pages = list(range(start_index, min(barcode_cursor, len(barcode_doc))))
+        barcode_text = "".join(
+            barcode_info[index]["text"] for index in barcode_pages
+        )
+        barcode_skus = [
+            barcode_info[index]["sku"]
+            for index in barcode_pages
+            if barcode_info[index].get("sku")
+        ]
+        entry = {
+            "page_index": page_index,
+            "sku": sku,
+            "sku_key": key,
+            "quantity": quantity,
+            "text": text,
+            "barcode_pages": barcode_pages,
+            "barcode_text": barcode_text,
+            "barcode_skus": barcode_skus,
+        }
+        entry["category_index"] = classify_sort_entry(entry, keywords)
+        package_entries.append(entry)
+        if len(barcode_pages) < quantity:
+            missing_matches.append(
+                {
+                    "sku": sku,
+                    "package_page": page_index + 1,
+                    "quantity": quantity,
+                    "matched": len(barcode_pages),
+                }
+            )
+        if not key:
+            unmatched_package_pages.append(page_index)
+
+    if keywords:
+        sorted_entries = sorted(
+            package_entries,
+            key=lambda item: (item["category_index"], item["page_index"]),
+        )
+    else:
+        sorted_entries = package_entries
+
+    sorted_package_pages = []
+    sorted_barcode_pages = []
+    for entry in sorted_entries:
+        sorted_package_pages.append(entry["page_index"])
+        sorted_barcode_pages.extend(entry["barcode_pages"])
+
+    consumed_barcode_pages = set(sorted_barcode_pages)
+    extra_barcode_pages = [
+        page_index
+        for page_index in range(len(barcode_doc))
+        if page_index not in consumed_barcode_pages
+    ]
+    sorted_barcode_pages.extend(extra_barcode_pages)
+
+    return {
+        "barcode_order": sorted_barcode_pages,
+        "package_order": sorted_package_pages,
+        "barcode_info": barcode_info,
+        "package_entries": package_entries,
+        "sorted_entries": sorted_entries,
+        "sort_keywords": list(keywords),
+        "missing_matches": missing_matches,
+        "extra_barcode_pages": extra_barcode_pages,
+        "unmatched_package_pages": unmatched_package_pages,
+        "group_count": len(
+            {
+                entry["category_index"]
+                for entry in package_entries
+                if entry["category_index"] < len(keywords)
+            }
+        )
+        if keywords
+        else 0,
+    }
+
+
+def save_sorted_documents(
+    barcode_pdf: str,
+    package_pdf: str,
+    output_barcode_pdf: str,
+    output_package_pdf: str,
+    sort_keywords: Optional[Sequence[str]] = None,
+    on_progress: Optional[Callable] = None,
+    stop_event: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
+    progress = on_progress or (lambda *args: None)
+    barcode_doc = None
+    package_doc = None
+    barcode_out = None
+    package_out = None
+    try:
+        barcode_doc = fitz.open(barcode_pdf)
+        package_doc = fitz.open(package_pdf)
+        if len(barcode_doc) == 0:
+            raise ValueError("条码 PDF 没有页面")
+        if len(package_doc) == 0:
+            raise ValueError("面单 PDF 没有页面")
+
+        progress(0, 2, "正在解析排序信息...")
+        plan = build_sort_plan(barcode_doc, package_doc, sort_keywords)
+
+        barcode_out = fitz.open()
+        total_barcode = len(plan["barcode_order"])
+        for output_index, page_index in enumerate(plan["barcode_order"], start=1):
+            if stop_event and stop_event.is_set():
+                raise InterruptedError("操作已被用户中断")
+            barcode_out.insert_pdf(barcode_doc, from_page=page_index, to_page=page_index)
+            progress(
+                output_index,
+                total_barcode,
+                f"正在排序条码 PDF：第 {output_index} / {total_barcode} 页",
+            )
+
+        package_out = fitz.open()
+        total_package = len(plan["package_order"])
+        for output_index, page_index in enumerate(plan["package_order"], start=1):
+            if stop_event and stop_event.is_set():
+                raise InterruptedError("操作已被用户中断")
+            package_out.insert_pdf(package_doc, from_page=page_index, to_page=page_index)
+            progress(
+                output_index,
+                total_package,
+                f"正在排序面单 PDF：第 {output_index} / {total_package} 页",
+            )
+
+        progress(2, 2, "正在保存排序后的 PDF...")
+        save_pdf_atomic(barcode_out, output_barcode_pdf)
+        save_pdf_atomic(package_out, output_package_pdf)
+        return {
+            "success": True,
+            "barcode_output_path": output_barcode_pdf,
+            "package_output_path": output_package_pdf,
+            "barcode_pages": len(plan["barcode_order"]),
+            "package_pages": len(plan["package_order"]),
+            "group_count": plan["group_count"],
+            "sort_keywords": plan["sort_keywords"],
+            "missing_matches": plan["missing_matches"],
+            "extra_barcode_pages": plan["extra_barcode_pages"],
+            "unmatched_package_pages": plan["unmatched_package_pages"],
+        }
+    finally:
+        for doc in (package_out, barcode_out, package_doc, barcode_doc):
+            if doc:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
+
+
 def save_filtered_document(
     source: fitz.Document,
     output_pdf: str,
@@ -58,6 +328,8 @@ def save_filtered_document(
     on_progress: Optional[Callable] = None,
     stop_event: Optional[threading.Event] = None,
     inverse: bool = False,
+    add_numbers: bool = False,
+    page_number_position: str = "right",
 ) -> Dict[str, Any]:
     """保存按特性关键词筛选后的新 PDF。"""
     progress = on_progress or (lambda *args: None)
@@ -89,6 +361,8 @@ def save_filtered_document(
             raise ValueError(f"没有页面{mode_text}特性信息：{keyword_text}")
 
         progress(total_pages, total_pages, "正在保存筛选后的 PDF...")
+        if add_numbers:
+            add_page_numbers(out, page_number_position)
         save_pdf_atomic(out, output_pdf)
         return {
             "matched_count": len(kept_pages),
@@ -96,6 +370,8 @@ def save_filtered_document(
             "matched_pages": kept_pages,
             "feature_keywords": list(keywords),
             "filter_inverse": inverse,
+            "page_numbers": add_numbers,
+            "page_number_position": page_number_position,
         }
     finally:
         try:
@@ -113,6 +389,8 @@ class FilterPDFWorker(threading.Thread):
         output_pdf: str,
         feature_keywords: str,
         filter_inverse: bool = False,
+        add_page_numbers_enabled: bool = False,
+        page_number_position: str = "right",
         on_progress: Optional[Callable] = None,
         on_complete: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
@@ -122,6 +400,8 @@ class FilterPDFWorker(threading.Thread):
         self.output_pdf = output_pdf
         self.keywords = parse_feature_keywords(feature_keywords)
         self.filter_inverse = filter_inverse
+        self.add_page_numbers_enabled = add_page_numbers_enabled
+        self.page_number_position = page_number_position
         self.on_progress = on_progress or (lambda *args: None)
         self.on_complete = on_complete or (lambda *args: None)
         self.on_error = on_error or (lambda *args: None)
@@ -147,6 +427,8 @@ class FilterPDFWorker(threading.Thread):
                 on_progress=self.on_progress,
                 stop_event=self._stop_event,
                 inverse=self.filter_inverse,
+                add_numbers=self.add_page_numbers_enabled,
+                page_number_position=self.page_number_position,
             )
             self.result = {
                 "success": True,
@@ -183,6 +465,8 @@ class BatchFilterPDFWorker(threading.Thread):
         filter_jobs: list,
         feature_keywords: str,
         filter_inverse: bool = False,
+        add_page_numbers_enabled: bool = False,
+        page_number_position: str = "right",
         on_progress: Optional[Callable] = None,
         on_complete: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
@@ -191,6 +475,8 @@ class BatchFilterPDFWorker(threading.Thread):
         self.filter_jobs = filter_jobs
         self.feature_keywords = feature_keywords
         self.filter_inverse = filter_inverse
+        self.add_page_numbers_enabled = add_page_numbers_enabled
+        self.page_number_position = page_number_position
         self.on_progress = on_progress or (lambda *args: None)
         self.on_complete = on_complete or (lambda *args: None)
         self.on_error = on_error or (lambda *args: None)
@@ -219,6 +505,8 @@ class BatchFilterPDFWorker(threading.Thread):
                     output_pdf,
                     self.feature_keywords,
                     filter_inverse=self.filter_inverse,
+                    add_page_numbers_enabled=self.add_page_numbers_enabled,
+                    page_number_position=self.page_number_position,
                     on_progress=lambda current, total, message, idx=job_index, count=total_jobs:
                         self.on_progress(current, total, f"[{idx}/{count}] {message}"),
                 )
@@ -249,6 +537,58 @@ class BatchFilterPDFWorker(threading.Thread):
         return self.is_alive()
 
 
+class SortPDFWorker(threading.Thread):
+    """双PDF排序工作线程"""
+
+    def __init__(
+        self,
+        barcode_pdf: str,
+        package_pdf: str,
+        output_barcode_pdf: str,
+        output_package_pdf: str,
+        sort_keywords: Optional[Sequence[str]] = None,
+        on_progress: Optional[Callable] = None,
+        on_complete: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+    ) -> None:
+        super().__init__(daemon=False)
+        self.barcode_pdf = barcode_pdf
+        self.package_pdf = package_pdf
+        self.output_barcode_pdf = output_barcode_pdf
+        self.output_package_pdf = output_package_pdf
+        self.sort_keywords = list(sort_keywords or [])
+        self.on_progress = on_progress or (lambda *args: None)
+        self.on_complete = on_complete or (lambda *args: None)
+        self.on_error = on_error or (lambda *args: None)
+        self._stop_event = threading.Event()
+        self.result = None
+        self.error = None
+
+    def run(self) -> None:
+        try:
+            self.result = save_sorted_documents(
+                self.barcode_pdf,
+                self.package_pdf,
+                self.output_barcode_pdf,
+                self.output_package_pdf,
+                sort_keywords=self.sort_keywords,
+                on_progress=self.on_progress,
+                stop_event=self._stop_event,
+            )
+            self.on_complete(self.result)
+        except Exception as e:
+            self.error = str(e)
+            self.on_error(self.error)
+
+    def stop(self) -> None:
+        """请求停止线程"""
+        self._stop_event.set()
+
+    def is_running(self) -> bool:
+        """检查线程是否运行中"""
+        return self.is_alive()
+
+
 class MergePDFWorker(threading.Thread):
     """PDF合并工作线程
     
@@ -260,7 +600,9 @@ class MergePDFWorker(threading.Thread):
                  on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
                  on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
                  reverse_save: bool = False, feature_filter_keywords: Optional[str] = None,
-                 feature_filter_inverse: bool = False) -> None:
+                 feature_filter_inverse: bool = False,
+                 add_page_numbers_enabled: bool = False,
+                 page_number_position: str = "right") -> None:
         """初始化工作线程
         
         Args:
@@ -275,6 +617,8 @@ class MergePDFWorker(threading.Thread):
             reverse_save: 是否按相反页序保存输出
             feature_filter_keywords: 合并后只保留包含这些特性信息的页面
             feature_filter_inverse: 是否反选，保留不包含特性信息的页面
+            add_page_numbers_enabled: 是否在最终输出添加页码
+            page_number_position: 页码位置，left 或 right
         """
         super().__init__(daemon=False)
         
@@ -289,6 +633,8 @@ class MergePDFWorker(threading.Thread):
         self.reverse_save = reverse_save
         self.feature_filter_keywords = parse_feature_keywords(feature_filter_keywords)
         self.feature_filter_inverse = feature_filter_inverse
+        self.add_page_numbers_enabled = add_page_numbers_enabled
+        self.page_number_position = page_number_position
         
         self._stop_event = threading.Event()
         self.result = None
@@ -407,9 +753,13 @@ class MergePDFWorker(threading.Thread):
                     on_progress=self.on_progress,
                     stop_event=self._stop_event,
                     inverse=self.feature_filter_inverse,
+                    add_numbers=self.add_page_numbers_enabled,
+                    page_number_position=self.page_number_position,
                 )
             else:
                 self.on_progress(total_barcode_pages, total_barcode_pages, "正在保存 PDF...")
+                if self.add_page_numbers_enabled:
+                    add_page_numbers(out, self.page_number_position)
                 save_pdf_atomic(out, self.output_pdf)
 
             result = {
@@ -477,7 +827,9 @@ class BatchMergePDFWorker(threading.Thread):
                  on_progress: Optional[Callable] = None, on_complete: Optional[Callable] = None,
                  on_error: Optional[Callable] = None, skip_keyword: Optional[str] = None,
                  reverse_save: bool = False, feature_filter_keywords: Optional[str] = None,
-                 feature_filter_inverse: bool = False) -> None:
+                 feature_filter_inverse: bool = False,
+                 add_page_numbers_enabled: bool = False,
+                 page_number_position: str = "right") -> None:
         super().__init__(daemon=False)
 
         self.base_pdf = base_pdf
@@ -490,6 +842,8 @@ class BatchMergePDFWorker(threading.Thread):
         self.reverse_save = reverse_save
         self.feature_filter_keywords = feature_filter_keywords
         self.feature_filter_inverse = feature_filter_inverse
+        self.add_page_numbers_enabled = add_page_numbers_enabled
+        self.page_number_position = page_number_position
         self._stop_event = threading.Event()
         self.result = None
         self.error = None
@@ -521,6 +875,8 @@ class BatchMergePDFWorker(threading.Thread):
                     reverse_save=self.reverse_save,
                     feature_filter_keywords=self.feature_filter_keywords,
                     feature_filter_inverse=self.feature_filter_inverse,
+                    add_page_numbers_enabled=self.add_page_numbers_enabled,
+                    page_number_position=self.page_number_position,
                 )
                 worker._stop_event = self._stop_event
                 result = worker._merge_pdf()
