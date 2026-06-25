@@ -60,8 +60,8 @@ def draw_page_number(
     """在页面左下或右下添加小号清晰页码。"""
     text = f"{page_number}/{total_pages}"
     fontsize = 9
-    margin_x = 18
-    margin_y = 18
+    margin_x = 8
+    margin_y = 8
     y = page.rect.y1 - margin_y
     if position == "left":
         x = page.rect.x0 + margin_x
